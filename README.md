@@ -1,8 +1,8 @@
 # Codex WSL Project RPC Workaround
 
 > **Experimental and unofficial.** This project is not affiliated with or
-> endorsed by OpenAI. Block 1, Subdivision 1.1 contains **no
-> functional workaround** and performs no Codex RPC operations.
+> endorsed by OpenAI. The current foundation contains **no functional
+> Codex workaround** and performs no Codex RPC operations.
 
 ## Project purpose
 
@@ -107,3 +107,22 @@ Destructive operations are not part of the currently approved roadmap. See the
 The durable technical rules are in
 [`projects-requirements.md`](projects-requirements.md), and coding agents are
 bound by [`AGENTS.md`](AGENTS.md).
+
+## Packaging and tests
+
+The project uses Python 3.11+, setuptools/PEP 517, a `src` package layout, and
+standard-library `unittest`. Run the installation-free test baseline from the
+repository root with:
+
+```console
+python3 -m unittest discover -s tests -v
+```
+
+These tests validate source metadata, package structure, version consistency,
+and an inert import in a controlled child process. Editable packaging is a
+separate validation: create the exact ignored repository-local environment
+`.cache/codex-wsl-rpc-packaging-venv`, then use its pip with `--isolated`,
+`--no-index`, `--no-build-isolation`, and `--no-deps`. This check depends only
+on compatible packaging tools already present locally; tooling must not be
+downloaded to repair the environment. No functional Codex workaround exists
+yet.

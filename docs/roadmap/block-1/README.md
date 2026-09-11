@@ -5,8 +5,8 @@ any Codex capability.
 
 | Subdivision | Objective | Status |
 |---|---|---|
-| [1.1](subdivision-1.1-foundation.md) | Repository scaffold, project context, requirements, and agent boundaries | Foundation baseline delivered for review |
-| 1.2 | Python packaging and test execution baseline | Planned; not part of Subdivision 1.1 |
+| [1.1](subdivision-1.1-foundation.md) | Repository scaffold, project context, requirements, and agent boundaries | IMPLEMENTED |
+| [1.2](subdivision-1.2-packaging-tests.md) | Python packaging and test execution baseline | Implementation present; packaging validation pending |
 
 Completion of Subdivision 1.1 does not authorize protocol implementation,
 Codex access, networking, or mutation.

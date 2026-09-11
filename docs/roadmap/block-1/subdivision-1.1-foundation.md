@@ -15,7 +15,7 @@ Codex state access, network behavior, or Project operation is included.
 
 ## Durable status
 
-- **Status:** Delivered for human review
+- **Status:** Implemented
 - **Mutation authorization:** `NONE`
 - **Acceptance evidence:** repository-local static validation, parsed package
   metadata, inert import smoke test, source compilation, and safety audit
