@@ -90,8 +90,9 @@ class InertImportTests(unittest.TestCase):
             work = sandbox / "work"
             home = sandbox / "home"
             state = sandbox / "state"
+            temp_root = sandbox / "tmp"
             report = sandbox / "report.json"
-            for directory in (work, home, state):
+            for directory in (work, home, state, temp_root):
                 directory.mkdir()
 
             probe = """
@@ -129,6 +130,9 @@ Path(os.environ["FOUNDATION_REPORT"]).write_text(
                 "LOCALAPPDATA": str(state / "localappdata"),
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "PYTHONPATH": str(SRC),
+                "TEMP": str(temp_root),
+                "TMP": str(temp_root),
+                "TMPDIR": str(temp_root),
                 "USERPROFILE": str(home),
             }
             for name in ("SYSTEMROOT", "SystemRoot", "WINDIR"):
@@ -154,7 +158,10 @@ Path(os.environ["FOUNDATION_REPORT"]).write_text(
             self.assertEqual(list(work.iterdir()), [])
             self.assertEqual(list(home.iterdir()), [])
             self.assertEqual(list(state.iterdir()), [])
-            self.assertEqual(set(sandbox.iterdir()), {work, home, state, report})
+            self.assertEqual(list(temp_root.iterdir()), [])
+            self.assertEqual(
+                set(sandbox.iterdir()), {work, home, state, temp_root, report}
+            )
 
 
 if __name__ == "__main__":
