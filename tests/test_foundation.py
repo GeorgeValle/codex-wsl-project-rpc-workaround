@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,25 @@ def load_pyproject() -> dict[str, object]:
     """Load source metadata without requiring an installed distribution."""
 
     return tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+
+
+def load_source_version() -> str:
+    """Read the package version without executing package source."""
+
+    tree = ast.parse((PACKAGE / "__init__.py").read_text(encoding="utf-8"))
+    versions = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "__version__"
+            for target in node.targets
+        ):
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                versions.append(node.value.value)
+
+    if len(versions) != 1:
+        raise AssertionError("Expected exactly one literal __version__ assignment")
+
+    return versions[0]
 
 
 class SourceMetadataTests(unittest.TestCase):
@@ -59,17 +79,7 @@ class PackageStructureTests(unittest.TestCase):
         self.assertFalse((ROOT / "codex_wsl_rpc").exists())
 
     def test_source_version_matches_project_version(self) -> None:
-        import importlib.util
-
-        init_file = PACKAGE / "__init__.py"
-        spec = importlib.util.spec_from_file_location("codex_wsl_rpc", init_file)
-        self.assertIsNotNone(spec)
-        self.assertIsNotNone(spec.loader)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
-        self.assertEqual(module.__version__, load_pyproject()["project"]["version"])
-        self.assertEqual(Path(module.__file__).resolve(), init_file.resolve())
+        self.assertEqual(load_source_version(), load_pyproject()["project"]["version"])
 
 
 class InertImportTests(unittest.TestCase):
