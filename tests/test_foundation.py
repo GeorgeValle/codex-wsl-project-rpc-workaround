@@ -20,6 +20,25 @@ PACKAGE = SRC / "codex_wsl_rpc"
 CACHE = ROOT / ".cache"
 
 
+def repository_cache_dir(cache: Path = CACHE, root: Path = ROOT) -> Path:
+    """Return a validated repository-local cache directory."""
+
+    resolved_root = root.resolve()
+    if cache.is_symlink():
+        raise AssertionError("Repository cache path must not be a symbolic link")
+    if cache.exists() and not cache.is_dir():
+        raise AssertionError("Repository cache path exists but is not a directory")
+
+    cache.mkdir(exist_ok=True)
+    resolved_cache = cache.resolve(strict=True)
+    if resolved_cache.parent != resolved_root:
+        raise AssertionError(
+            "Repository cache path resolves outside the repository root"
+        )
+
+    return resolved_cache
+
+
 def load_pyproject() -> dict[str, object]:
     """Load source metadata without requiring an installed distribution."""
 
@@ -82,10 +101,48 @@ class PackageStructureTests(unittest.TestCase):
         self.assertEqual(load_source_version(), load_pyproject()["project"]["version"])
 
 
+class RepositoryCacheTests(unittest.TestCase):
+    def test_repository_local_cache_directory_is_accepted(self) -> None:
+        cache = repository_cache_dir()
+        with tempfile.TemporaryDirectory(prefix="cache-boundary-", dir=cache) as temporary:
+            test_root = Path(temporary)
+            test_cache = test_root / ".cache"
+
+            self.assertEqual(
+                repository_cache_dir(cache=test_cache, root=test_root),
+                test_cache.resolve(strict=True),
+            )
+
+    def test_existing_non_directory_cache_path_is_rejected(self) -> None:
+        cache = repository_cache_dir()
+        with tempfile.TemporaryDirectory(prefix="cache-boundary-", dir=cache) as temporary:
+            test_root = Path(temporary)
+            test_cache = test_root / ".cache"
+            test_cache.write_text("not a directory", encoding="utf-8")
+
+            with self.assertRaisesRegex(AssertionError, "is not a directory"):
+                repository_cache_dir(cache=test_cache, root=test_root)
+
+    def test_symbolic_link_cache_path_is_rejected(self) -> None:
+        cache = repository_cache_dir()
+        with tempfile.TemporaryDirectory(prefix="cache-boundary-", dir=cache) as temporary:
+            test_root = Path(temporary)
+            target = test_root / "target"
+            target.mkdir()
+            test_cache = test_root / ".cache"
+            try:
+                test_cache.symlink_to(target, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"symbolic-link creation is unavailable: {error}")
+
+            with self.assertRaisesRegex(AssertionError, "must not be a symbolic link"):
+                repository_cache_dir(cache=test_cache, root=test_root)
+
+
 class InertImportTests(unittest.TestCase):
     def test_import_is_inert_under_targeted_observation_guards(self) -> None:
-        CACHE.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="foundation-import-", dir=CACHE) as temporary:
+        cache = repository_cache_dir()
+        with tempfile.TemporaryDirectory(prefix="foundation-import-", dir=cache) as temporary:
             sandbox = Path(temporary)
             work = sandbox / "work"
             home = sandbox / "home"
