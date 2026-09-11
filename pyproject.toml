@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-wsl-rpc"
+version = "0.0.0"
+description = "Experimental, non-functional foundation for a Codex Desktop WSL workaround"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
