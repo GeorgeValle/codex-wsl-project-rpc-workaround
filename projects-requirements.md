@@ -49,8 +49,9 @@ possible WSL-first Project-management workaround.
   explicitly reviewed scope.
 - **SAFE-002:** Code MUST NOT delete Projects, user data, or perform destructive
   filesystem operations.
-- **SAFE-003:** PR1 MUST remain non-functional: no app-server process handling,
-  RPC, network, Codex state access, or mutation.
+- **SAFE-003:** Block 1, Subdivision 1.1 MUST remain `NON_FUNCTIONAL`: no
+  app-server process handling, real RPC invocation, network behavior, Codex
+  state access, configuration modification, or mutation.
 - **SAFE-004:** Changes SHOULD be small, auditable, and reversible.
 
 ## Secrets policy

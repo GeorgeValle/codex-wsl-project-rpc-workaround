@@ -1,8 +1,9 @@
 # Test policy
 
-PR1 intentionally adds no fake functional tests because no functional behavior
-exists to exercise. Subdivision 1.2 will establish packaging and deterministic
-test execution rather than expanding capability in this foundation change.
+Subdivision 1.1 intentionally adds no fake functional tests because no
+functional behavior exists to exercise. Subdivision 1.2 will establish
+packaging and deterministic test execution rather than expanding capability in
+this foundation change.
 
 Future tests MUST default to mocks or fakes. By default, they MUST NOT:
 

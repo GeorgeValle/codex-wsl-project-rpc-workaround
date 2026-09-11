@@ -1,7 +1,7 @@
 # Codex WSL Project RPC Workaround
 
 > **Experimental and unofficial.** This project is not affiliated with or
-> endorsed by OpenAI. The current foundation baseline (PR1) contains **no
+> endorsed by OpenAI. Block 1, Subdivision 1.1 contains **no
 > functional workaround** and performs no Codex RPC operations.
 
 ## Project purpose
@@ -74,8 +74,8 @@ The objective is to manage Projects without relying on the broken Desktop
 Project registration path.
 
 Potential future operations are read-only Project listing, controlled Project
-creation, and controlled Project update. **None of these features exists in
-PR1.**
+creation, and controlled Project update. **None of these features exists at the
+current `NON_FUNCTIONAL` capability level.**
 
 ## Staged progression
 

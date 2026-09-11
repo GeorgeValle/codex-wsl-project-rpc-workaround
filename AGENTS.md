@@ -23,7 +23,7 @@ Agents MUST NOT:
   operations;
 - invoke `project/create`, `project/update`, `project/move`, or
   `project/delete` without exact, reviewed authorization;
-- invoke any real Codex RPC in PR1.
+- during Block 1, Subdivision 1.1, invoke any real Codex RPC.
 
 Repository-local, task-relevant development commands are permitted only when
 their effects are understood and bounded. Agents MUST NOT broaden authorization
