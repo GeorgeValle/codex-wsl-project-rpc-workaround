@@ -71,15 +71,51 @@ source = os.environ.get("FOUNDATION_SRC")
 if source:
     sys.path.insert(0, source)
 
+allowed_read_roots = [
+    Path(value).resolve()
+    for value in json.loads(os.environ["FOUNDATION_ALLOWED_READ_ROOTS"])
+]
+filesystem_io = []
+observing_import = True
+
+def observe_open(event, arguments):
+    if event != "open" or not observing_import:
+        return
+    raw_path, mode, flags = arguments
+    if isinstance(raw_path, int):
+        path = f"file-descriptor:{{raw_path}}"
+        allowed = False
+    else:
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = Path.cwd() / candidate
+        resolved = candidate.resolve()
+        path = str(resolved)
+        allowed = any(resolved == root or root in resolved.parents for root in allowed_read_roots)
+    writing = (
+        isinstance(mode, str) and any(marker in mode for marker in "wax+")
+    ) or (
+        isinstance(flags, int)
+        and bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
+    )
+    filesystem_io.append({{"path": path, "write": writing, "allowed": allowed}})
+    if writing or not allowed:
+        raise RuntimeError(f"prohibited filesystem open: {{path}}")
+
+sys.addaudithook(observe_open)
 import codex_wsl_rpc
+observing_import = False
 metadata_result = None
 {metadata_probe}
 Path(os.environ["FOUNDATION_REPORT"]).write_text(
     json.dumps({{
         "origin": str(Path(codex_wsl_rpc.__file__).resolve()),
         "invoked": invoked,
+        "filesystem_io": filesystem_io,
         "metadata": metadata_result,
     }}),
     encoding="utf-8",
 )
+if any(item["write"] or not item["allowed"] for item in filesystem_io):
+    raise RuntimeError("prohibited filesystem I/O observed during package import")
 """

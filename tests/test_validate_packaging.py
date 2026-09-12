@@ -18,7 +18,7 @@ import unittest
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from unittest import mock
 
-from _safety_support import repository_cache_dir
+from _safety_support import guarded_import_probe, repository_cache_dir
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,8 +28,34 @@ IMPORT_PROBE_TIMEOUT_SECONDS = 10
 validate_packaging = None
 
 
-def _tree_snapshot(path: Path) -> set[Path]:
-    return {item.relative_to(path) for item in path.rglob("*")}
+def _tree_fingerprint(
+    path: Path, *, ignored: frozenset[Path] = frozenset()
+) -> tuple[tuple[str, str, str], ...]:
+    """Fingerprint a controlled tree without following symlinks."""
+
+    entries = []
+    excluded = {".git", ".cache", "__pycache__"}
+    for current, directories, files in os.walk(path, followlinks=False):
+        current_path = Path(current)
+        directories[:] = sorted(name for name in directories if name not in excluded)
+        for name in directories + sorted(files):
+            entry = current_path / name
+            relative = entry.relative_to(path)
+            if relative in ignored:
+                continue
+            if entry.is_symlink():
+                entries.append((str(relative), "symlink", os.readlink(entry)))
+            elif entry.is_file():
+                entries.append((str(relative), "file", hashlib.sha256(entry.read_bytes()).hexdigest()))
+            elif entry.is_dir():
+                entries.append((str(relative), "directory", ""))
+            else:
+                entries.append((str(relative), "other", ""))
+    return tuple(sorted(entries))
+
+
+def _import_fingerprint(target: Path) -> tuple[object, object]:
+    return _tree_fingerprint(ROOT), _tree_fingerprint(target.parent)
 
 
 def _probe_first_import(target: Path) -> None:
@@ -45,7 +71,10 @@ def _probe_first_import(target: Path) -> None:
             directory.mkdir()
         report = sandbox / "report.json"
         report.touch()
-        before = _tree_snapshot(sandbox)
+        before = (
+            _tree_fingerprint(sandbox, ignored=frozenset({Path("report.json")})),
+            _import_fingerprint(target),
+        )
         probe = r'''
 import importlib.util
 import json
@@ -111,14 +140,17 @@ Path(os.environ["VALIDATOR_REPORT"]).write_text(
         except subprocess.TimeoutExpired as error:
             raise RuntimeError("Validator first-import probe timed out") from error
         observation = json.loads(report.read_text(encoding="utf-8"))
-        after = _tree_snapshot(sandbox)
+        after = (
+            _tree_fingerprint(sandbox, ignored=frozenset({Path("report.json")})),
+            _import_fingerprint(target),
+        )
         if (result.returncode or result.stdout or result.stderr or
                 observation["error"] or observation["attempts"] or after != before):
             raise RuntimeError(
                 "Validator first-import probe failed: "
                 f"returncode={result.returncode}, stdout={result.stdout!r}, "
                 f"stderr={result.stderr!r}, observation={observation!r}, "
-                f"artifacts={sorted(map(str, after - before))!r}"
+                f"filesystem_changed={after != before}"
             )
 
 
@@ -136,7 +168,7 @@ def _load_validator_after_probe(target: Path = VALIDATOR, loader=None):
             raise RuntimeError("prohibited operation: " + name)
         return guard
 
-    before = _tree_snapshot(ROOT)
+    before = _import_fingerprint(target)
     stdout = io.StringIO()
     stderr = io.StringIO()
     original_cwd = Path.cwd()
@@ -162,12 +194,12 @@ def _load_validator_after_probe(target: Path = VALIDATOR, loader=None):
         os.chdir(original_cwd)
         os.environ.clear()
         os.environ.update(original_environment)
-    after = _tree_snapshot(ROOT)
+    after = _import_fingerprint(target)
     if attempts or stdout.getvalue() or stderr.getvalue() or after != before:
         raise RuntimeError(
             "Guarded validator load failed: "
             f"attempts={attempts!r}, stdout={stdout.getvalue()!r}, "
-            f"stderr={stderr.getvalue()!r}, artifacts={sorted(map(str, after - before))!r}"
+            f"stderr={stderr.getvalue()!r}, filesystem_changed={after != before}"
         )
     return module
 
@@ -381,6 +413,7 @@ class OrchestrationTests(FixtureMixin, unittest.TestCase):
                     report.write_text(json.dumps({
                         "origin": str((workspace / "project/src/codex_wsl_rpc/__init__.py").resolve()),
                         "invoked": [],
+                        "filesystem_io": [],
                         "metadata": {"name": "codex-wsl-rpc", "version": "0.0.0",
                                      "requires_python": ">=3.11", "requires_dist": [],
                                      "entry_points": []},
@@ -464,6 +497,62 @@ class RealProcessRunnerTests(FixtureMixin, unittest.TestCase):
 
 
 class ImportInertnessTests(FixtureMixin, unittest.TestCase):
+    def test_guarded_package_probe_rejects_unrelated_file_read(self):
+        with self.sandbox() as temporary:
+            area = Path(temporary)
+            package_root = area / "source"
+            package = package_root / "codex_wsl_rpc"
+            package.mkdir(parents=True)
+            unrelated = area / "unrelated.txt"
+            unrelated.write_text("controlled fixture", encoding="utf-8")
+            (package / "__init__.py").write_text(
+                "from pathlib import Path\n"
+                "try:\n"
+                f"    Path({str(unrelated)!r}).read_text(encoding='utf-8')\n"
+                "except RuntimeError:\n"
+                "    pass\n",
+                encoding="utf-8",
+            )
+            report = area / "report.json"
+            environment = {
+                "FOUNDATION_ALLOWED_READ_ROOTS": json.dumps([str(package_root)]),
+                "FOUNDATION_REPORT": str(report),
+                "FOUNDATION_SRC": str(package_root),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+            result = subprocess.run(
+                [sys.executable, "-S", "-B", "-c", guarded_import_probe()],
+                cwd=area,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                shell=False,
+                timeout=IMPORT_PROBE_TIMEOUT_SECONDS,
+            )
+            observation = json.loads(report.read_text(encoding="utf-8"))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("prohibited filesystem I/O observed", result.stderr)
+            self.assertTrue(any(not item["allowed"] for item in observation["filesystem_io"]))
+
+    def test_validator_import_rewrite_is_rejected_but_inert_import_succeeds(self):
+        with self.sandbox() as temporary:
+            area = Path(temporary)
+            existing = area / "existing.txt"
+            existing.write_text("before", encoding="utf-8")
+            rewriting = area / "rewriting.py"
+            rewriting.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(existing)!r}).write_text('after', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "filesystem_changed"):
+                _load_validator_after_probe(rewriting)
+
+            inert = area / "inert.py"
+            inert.write_text("VALUE = 1\n", encoding="utf-8")
+            self.assertEqual(_load_validator_after_probe(inert).VALUE, 1)
+
     def test_parent_load_rejects_environment_conditional_operation_and_restores_guards(self):
         with self.sandbox() as temporary:
             fixture = Path(temporary) / "conditional_import.py"

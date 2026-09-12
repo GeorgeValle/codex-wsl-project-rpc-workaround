@@ -156,6 +156,7 @@ class InertImportTests(unittest.TestCase):
                 "APPDATA": str(state / "appdata"),
                 "FOUNDATION_REPORT": str(report),
                 "FOUNDATION_SRC": str(SRC),
+                "FOUNDATION_ALLOWED_READ_ROOTS": json.dumps([str(SRC.resolve())]),
                 "HOME": str(home),
                 "LOCALAPPDATA": str(state / "localappdata"),
                 "PYTHONDONTWRITEBYTECODE": "1",
@@ -191,6 +192,9 @@ class InertImportTests(unittest.TestCase):
             observation = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(observation["origin"], str((PACKAGE / "__init__.py").resolve()))
             self.assertEqual(observation["invoked"], [])
+            self.assertTrue(observation["filesystem_io"])
+            self.assertTrue(all(item["allowed"] and not item["write"]
+                                for item in observation["filesystem_io"]))
             self.assertEqual(list(work.iterdir()), [])
             self.assertEqual(list(home.iterdir()), [])
             self.assertEqual(list(state.iterdir()), [])

@@ -260,6 +260,11 @@ def validate_installation(workspace: Path, project: Path, venv_python: Path,
     report = workspace / "installed.json"
     probe_environment = dict(environment)
     probe_environment["FOUNDATION_REPORT"] = str(report)
+    probe_environment["FOUNDATION_ALLOWED_READ_ROOTS"] = json.dumps([
+        str((project / "src").resolve()),
+        str(venv_python.parent.parent.resolve()),
+        str(Path(sys.base_prefix).resolve()),
+    ])
     run_checked(
         runner, [str(venv_python), "-I", "-B", "-c",
                  guarded_import_probe(include_distribution_metadata=True)],
@@ -274,7 +279,10 @@ def validate_installation(workspace: Path, project: Path, venv_python: Path,
         "name": "codex-wsl-rpc", "version": "0.0.0",
         "requires_python": ">=3.11", "requires_dist": [], "entry_points": [],
     }
-    if observation["metadata"] != expected or observation["invoked"]:
+    filesystem_violation = any(
+        item["write"] or not item["allowed"] for item in observation["filesystem_io"]
+    )
+    if observation["metadata"] != expected or observation["invoked"] or filesystem_violation:
         raise ValidationError(f"Installed distribution validation failed: {observation}")
 
 
