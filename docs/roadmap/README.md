@@ -10,6 +10,7 @@ may require one or more PRs.
 - **Subdivision 1.1 — Repository scaffold, project context, requirements, and
   agent boundaries** ([detail](block-1/subdivision-1.1-foundation.md))
 - **Subdivision 1.2 — Python packaging and test execution baseline**
+  ([detail](block-1/subdivision-1.2-packaging-tests.md))
 
 See the [Block 1 index](block-1/README.md).
 
