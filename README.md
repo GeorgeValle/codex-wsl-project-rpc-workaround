@@ -120,9 +120,12 @@ python3 -m unittest discover -s tests -v
 
 These tests validate source metadata, package structure, version consistency,
 and an inert import in a controlled child process. Editable packaging is a
-separate validation: create the exact ignored repository-local environment
-`.cache/codex-wsl-rpc-packaging-venv`, then use its pip with `--isolated`,
-`--no-index`, `--no-build-isolation`, and `--no-deps`. This check depends only
-on compatible packaging tools already present locally; tooling must not be
-downloaded to repair the environment. No functional Codex workaround exists
-yet.
+separate validation. Codex Cloud setup pre-provisions the pinned
+`setuptools 84.0.0` wheel in the ignored repository-local directory
+`.cache/codex-wsl-rpc-wheelhouse/`; this pre-task environment provisioning is
+not part of the package's runtime dependency model. Validation creates the
+exact ignored repository-local environment
+`.cache/codex-wsl-rpc-packaging-venv`, then uses pip build isolation with
+`--isolated`, `--no-index`, the local wheelhouse, `--no-cache-dir`, and
+`--no-deps`. The validation task does not download or install missing tooling
+from a package index. No functional Codex workaround exists yet.

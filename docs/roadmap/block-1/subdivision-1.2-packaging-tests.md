@@ -30,35 +30,39 @@ WSL, or real user state.
 
 ## Packaging validation strategy
 
-Packaging validation is separate from normal tests. It first requires Python
-3.11+, standard-library prerequisites, pip, setuptools, and a usable `venv` to
-be present; nothing may be installed or upgraded to repair the environment.
-The exact ignored repository-local environment is
-`.cache/codex-wsl-rpc-packaging-venv`. Its interpreter must execute:
+Packaging validation is separate from normal tests. Before the validation task
+starts, Codex Cloud setup pre-provisions the pinned `setuptools 84.0.0` wheel
+under `.cache/codex-wsl-rpc-wheelhouse/`. This environment provisioning is not
+part of the package runtime dependency model. The task validates that the
+wheelhouse is repository-local and then creates the exact ignored,
+repository-local environment `.cache/codex-wsl-rpc-packaging-venv`. Its pip
+uses build isolation and obtains build tooling only from the local wheelhouse:
 
 ```console
-.cache/codex-wsl-rpc-packaging-venv/bin/python -m pip --isolated install --no-index --no-build-isolation --no-deps --editable .
+.cache/codex-wsl-rpc-packaging-venv/bin/python -m pip --isolated --disable-pip-version-check install --no-index --find-links .cache/codex-wsl-rpc-wheelhouse --no-cache-dir --no-deps --editable .
 ```
 
 Validation then runs from a controlled directory outside the repository root
 and uses `importlib.metadata` to check the checkout import origin, distribution
 name/version, `Requires-Python`, empty `Requires-Dist`, and absent
-`console_scripts`. Only the exact validation paths may be removed afterward.
+`console_scripts`. The validation performs no package-index or runtime
+dependency resolution and no automatic tooling download. Only the exact
+disposable venv may be removed afterward; the provisioned wheelhouse remains.
 
 ## Acceptance evidence and limitations
 
 The source tests and controlled child-process import provide bounded evidence,
 not proof against every possible side effect. Static source audit is required
-as complementary evidence. In the recorded implementation environment, Python
-and unit-test prerequisites were available but setuptools was absent from the
-base interpreter and disposable venv. Consequently offline editable packaging
-validation is blocked, and this Subdivision is **not complete** until that
-required validation passes with already-approved local tooling.
+as complementary evidence. In the recorded validation environment, the fresh
+Python 3.12 venv did not need setuptools preinstalled: pip build isolation
+successfully obtained `setuptools 84.0.0` from the provisioned local wheelhouse
+with `--no-index`, and the editable install and installed metadata checks
+passed. Environment provisioning occurred before the task; packaging
+validation itself used the local wheelhouse only.
 
 ## Deferrals and durable status
 
-- **Status:** Implementation present; packaging validation blocked by an
-  external prerequisite
+- **Status:** `IMPLEMENTED`
 - **Block 2 deferrals:** protocol research, schemas, JSON-RPC, fake or real
   transport, app-server/executable lifecycle, and every Project RPC
 - **Other deferrals:** Codex/Windows/WSL integration, Codex state access,

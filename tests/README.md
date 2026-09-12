@@ -22,16 +22,21 @@ targeted runtime guards rather than globally patching filesystem operations.
 
 Editable installation is a separate packaging-validation step, not a
 prerequisite for normal tests. It uses the exact ignored repository-local venv
-`.cache/codex-wsl-rpc-packaging-venv`, pre-existing pip and setuptools, and:
+`.cache/codex-wsl-rpc-packaging-venv`. Codex Cloud setup first pre-provisions a
+pinned `setuptools 84.0.0` wheel under the ignored repository-local
+`.cache/codex-wsl-rpc-wheelhouse/`. That pre-task provisioning is validation
+infrastructure, not a package runtime dependency. The editable install keeps
+pip build isolation enabled and uses only the local wheelhouse:
 
 ```console
-.cache/codex-wsl-rpc-packaging-venv/bin/python -m pip --isolated install --no-index --no-build-isolation --no-deps --editable .
+.cache/codex-wsl-rpc-packaging-venv/bin/python -m pip --isolated --disable-pip-version-check install --no-index --find-links .cache/codex-wsl-rpc-wheelhouse --no-cache-dir --no-deps --editable .
 ```
 
 After installation, validation must run outside the repository root and check
 the import origin plus distribution name, version, `Requires-Python`, empty
 `Requires-Dist`, and absent `console_scripts` with `importlib.metadata`.
-Packaging tooling must not be installed or upgraded to make this check pass.
+The validation task performs no package-index resolution, runtime dependency
+resolution, or automatic tooling download.
 
 Tests are bounded and deterministic. They do not:
 
