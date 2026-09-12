@@ -23,6 +23,8 @@ workspace beneath `.cache`, copies the current packaging inputs into it, and
 performs a build-isolated editable install of that copy. Pip uses only a private
 copy of the approved wheel with package-index access disabled. Installation
 metadata and package origin are checked from the workspace's `run` directory.
+The executable packaging command requires Linux/WSL so timeout handling can
+terminate and reap the owned process group, including ordinary descendants.
 
 The packaging check removes only its owned workspace after complete success.
 On failure it reports and retains that workspace for inspection. It never

@@ -56,6 +56,10 @@ The installed probe runs with `-I -B` from the workspace `run` directory and
 checks distribution name/version, Python requirement, empty requirements,
 absent console and GUI entry points, guarded import behavior, and copied-source
 origin. The normal SOURCE import probe remains a distinct `-S` guarded check.
+On Linux/WSL, each packaging command runs in a newly owned process group; a
+timeout or interrupted wait terminates and boundedly reaps that group. Native
+Windows is intentionally unsupported by this command rather than receiving
+weaker timeout semantics.
 
 Only a fully successful run removes its unique workspace. Failures retain and
 report that workspace. The shared wheelhouse, pre-existing workspaces, original
@@ -72,7 +76,11 @@ and mutation remain in force.
 This validation is not an operating-system sandbox for arbitrary malicious
 Python. It does not claim resistance to a compromised interpreter or kernel, or
 to a hostile same-user process concurrently replacing validated files. These
-limits do not excuse reproducible defects: review findings should identify a
+limits also exclude a deliberately escaping descendant that creates a new
+process group. The test loader applies scoped observation guards to the actual
+parent import of the trusted validator, but this remains targeted regression
+coverage rather than arbitrary-code sandboxing. These limits do not excuse
+reproducible defects: review findings should identify a
 concrete failure path under this execution model and distinguish current bugs
 from speculative hardening.
 

@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import shutil
 import stat
 import subprocess
@@ -39,6 +40,52 @@ class ValidationError(RuntimeError):
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+def _stop_process_group(process: subprocess.Popen[str]) -> None:
+    """Stop and reap the Linux process group owned by *process*, boundedly."""
+
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.communicate(timeout=2)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.communicate(timeout=2)
+    except subprocess.TimeoutExpired as error:
+        raise ValidationError("Could not reap terminated packaging process group") from error
+
+
+def run_process(arguments: Sequence[str], *, cwd: Path, env: dict[str, str],
+                capture_output: bool, text: bool, check: bool, shell: bool,
+                timeout: int) -> subprocess.CompletedProcess[str]:
+    """Run one Linux/WSL command in an owned process group."""
+
+    if not sys.platform.startswith("linux"):
+        raise ValidationError(
+            "Packaging validation requires Linux/WSL process-group semantics"
+        )
+    process = subprocess.Popen(
+        list(arguments), cwd=cwd, env=env, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=text, shell=False, start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _stop_process_group(process)
+        raise
+    except BaseException:
+        _stop_process_group(process)
+        raise
+    return subprocess.CompletedProcess(arguments, process.returncode, stdout, stderr)
 
 
 def _regular_file(path: Path, description: str) -> None:
@@ -231,10 +278,11 @@ def validate_installation(workspace: Path, project: Path, venv_python: Path,
         raise ValidationError(f"Installed distribution validation failed: {observation}")
 
 
-def execute(workspace: Path, *, runner: Runner = subprocess.run,
+def execute(workspace: Path, *, runner: Runner | None = None,
             root: Path = ROOT, wheelhouse: Path = PROVISIONED_WHEELHOUSE) -> None:
     """Execute the complete packaging pipeline in one already-owned workspace."""
 
+    runner = run_process if runner is None else runner
     source = validate_source_root(root, root / "src")
     original_metadata = source / "codex_wsl_rpc.egg-info"
     metadata_before = path_fingerprint(original_metadata)
@@ -272,6 +320,13 @@ def execute(workspace: Path, *, runner: Runner = subprocess.run,
 def main() -> int:
     """Allocate one fresh workspace, validate, and clean only after success."""
 
+    if not sys.platform.startswith("linux"):
+        print(
+            "PACKAGING VALIDATION FAILED: this command requires Linux/WSL; "
+            "use the documented Linux/WSL validation path",
+            file=sys.stderr,
+        )
+        return 1
     try:
         cache = repository_cache_dir(CACHE, ROOT)
         workspace = Path(tempfile.mkdtemp(prefix="packaging-check-", dir=cache))

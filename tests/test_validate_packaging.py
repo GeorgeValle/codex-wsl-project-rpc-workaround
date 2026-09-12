@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
+import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from unittest import mock
 
 from _safety_support import repository_cache_dir
@@ -123,7 +128,47 @@ def _load_validator_after_probe(target: Path = VALIDATOR, loader=None):
     if spec is None or spec.loader is None:
         raise RuntimeError("Cannot create validator import specification")
     module = importlib.util.module_from_spec(spec)
-    (loader or spec.loader.exec_module)(module)
+    attempts = []
+
+    def prohibit(name):
+        def guard(*args, **kwargs):
+            attempts.append(name)
+            raise RuntimeError("prohibited operation: " + name)
+        return guard
+
+    before = _tree_snapshot(ROOT)
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    original_cwd = Path.cwd()
+    original_environment = dict(os.environ)
+    original_dont_write_bytecode = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        with ExitStack() as patches, redirect_stdout(stdout), redirect_stderr(stderr):
+            for owner, name, label in (
+                (socket, "create_connection", "socket.create_connection"),
+                (socket.socket, "connect", "socket.socket.connect"),
+                (subprocess, "Popen", "subprocess.Popen"),
+                (subprocess, "run", "subprocess.run"),
+                (os, "system", "os.system"),
+                (sqlite3, "connect", "sqlite3.connect"),
+                (tempfile, "mkdtemp", "tempfile.mkdtemp"),
+                (os, "mkdir", "os.mkdir"),
+            ):
+                patches.enter_context(mock.patch.object(owner, name, prohibit(label)))
+            (loader or spec.loader.exec_module)(module)
+    finally:
+        sys.dont_write_bytecode = original_dont_write_bytecode
+        os.chdir(original_cwd)
+        os.environ.clear()
+        os.environ.update(original_environment)
+    after = _tree_snapshot(ROOT)
+    if attempts or stdout.getvalue() or stderr.getvalue() or after != before:
+        raise RuntimeError(
+            "Guarded validator load failed: "
+            f"attempts={attempts!r}, stdout={stdout.getvalue()!r}, "
+            f"stderr={stderr.getvalue()!r}, artifacts={sorted(map(str, after - before))!r}"
+        )
     return module
 
 
@@ -368,7 +413,77 @@ class OrchestrationTests(FixtureMixin, unittest.TestCase):
                 validate_packaging.run_checked(timeout, ["python"], cwd=area, environment=environment)
 
 
+class RealProcessRunnerTests(FixtureMixin, unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux process groups required")
+    def test_successful_command(self):
+        with self.sandbox() as temporary:
+            area = Path(temporary)
+            result = validate_packaging.run_process(
+                [sys.executable, "-c", "print('ok')"], cwd=area,
+                env={"PATH": os.defpath}, capture_output=True, text=True,
+                check=False, shell=False, timeout=5,
+            )
+            self.assertEqual((result.returncode, result.stdout), (0, "ok\n"))
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux process groups required")
+    def test_timeout_terminates_owned_group(self):
+        process = mock.Mock(pid=43210)
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(["python"], 1),
+            ("", ""),
+        ]
+        with mock.patch.object(validate_packaging.subprocess, "Popen", return_value=process) as popen:
+            with mock.patch.object(validate_packaging.os, "killpg") as killpg:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    validate_packaging.run_process(
+                        ["python"], cwd=ROOT, env={}, capture_output=True,
+                        text=True, check=False, shell=False, timeout=1,
+                    )
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        killpg.assert_called_once_with(43210, validate_packaging.signal.SIGTERM)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux process groups required")
+    def test_descendant_cannot_finish_planned_work_after_timeout(self):
+        with self.sandbox() as temporary:
+            area = Path(temporary)
+            marker = area / "descendant-finished"
+            child = "import pathlib,time,sys; time.sleep(2); pathlib.Path(sys.argv[1]).write_text('bad')"
+            parent = (
+                "import subprocess,sys,time; "
+                "subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]]); "
+                "time.sleep(30)"
+            )
+            with self.assertRaises(subprocess.TimeoutExpired):
+                validate_packaging.run_process(
+                    [sys.executable, "-c", parent, child, str(marker)], cwd=area,
+                    env={"PATH": os.defpath}, capture_output=True, text=True,
+                    check=False, shell=False, timeout=1,
+                )
+            time.sleep(2.5)
+            self.assertFalse(marker.exists())
+
+
 class ImportInertnessTests(FixtureMixin, unittest.TestCase):
+    def test_parent_load_rejects_environment_conditional_operation_and_restores_guards(self):
+        with self.sandbox() as temporary:
+            fixture = Path(temporary) / "conditional_import.py"
+            fixture.write_text(
+                "import os\n"
+                "if os.environ.get('VALIDATOR_PARENT_ATTEMPT'):\n"
+                "    try:\n"
+                "        os.system('never-executed')\n"
+                "    except RuntimeError:\n"
+                "        pass\n",
+                encoding="utf-8",
+            )
+            original_system = os.system
+            with mock.patch.dict(os.environ, {"VALIDATOR_PARENT_ATTEMPT": "1"}):
+                with self.assertRaisesRegex(RuntimeError, "os.system"):
+                    _load_validator_after_probe(fixture)
+            self.assertIs(os.system, original_system)
+            module = _load_validator_after_probe(fixture)
+            self.assertIsNotNone(module)
+
     def test_first_import_probe_rejects_directory_creation(self):
         with self.sandbox() as temporary:
             fixture = Path(temporary) / "unsafe_import.py"
