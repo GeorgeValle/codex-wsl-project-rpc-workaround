@@ -18,6 +18,7 @@ PYPROJECT = ROOT / "pyproject.toml"
 SRC = (ROOT / "src").resolve()
 PACKAGE = SRC / "codex_wsl_rpc"
 CACHE = ROOT / ".cache"
+IMPORT_PROBE_TIMEOUT_SECONDS = 10
 
 
 def repository_cache_dir(cache: Path = CACHE, root: Path = ROOT) -> Path:
@@ -233,15 +234,22 @@ Path(os.environ["FOUNDATION_REPORT"]).write_text(
                 if name in os.environ:
                     environment[name] = os.environ[name]
 
-            result = subprocess.run(
-                [sys.executable, "-S", "-c", probe],
-                cwd=work,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-                shell=False,
-            )
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-S", "-c", probe],
+                    cwd=work,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    shell=False,
+                    timeout=IMPORT_PROBE_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "Guarded codex_wsl_rpc import probe exceeded "
+                    f"{IMPORT_PROBE_TIMEOUT_SECONDS} seconds"
+                )
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "")
