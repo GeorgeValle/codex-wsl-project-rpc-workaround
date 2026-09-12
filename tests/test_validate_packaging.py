@@ -18,7 +18,13 @@ import unittest
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from unittest import mock
 
-from _safety_support import guarded_import_probe, repository_cache_dir
+from _safety_support import (
+    FILESYSTEM_MUTATION_PRIMITIVES,
+    READ_ONLY_OS_AUDIT_EVENTS,
+    guarded_import_probe,
+    is_denied_import_audit_event,
+    repository_cache_dir,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,7 +81,7 @@ def _probe_first_import(target: Path) -> None:
             _tree_fingerprint(sandbox, ignored=frozenset({Path("report.json")})),
             _import_fingerprint(target),
         )
-        probe = r'''
+        probe = rf'''
 import importlib.util
 import json
 import os
@@ -83,9 +89,11 @@ from pathlib import Path
 import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 
 attempts = []
+denied_audit_events = []
 def prohibit(name):
     def guard(*args, **kwargs):
         attempts.append(name)
@@ -98,11 +106,48 @@ subprocess.Popen = prohibit("subprocess.Popen")
 os.system = prohibit("os.system")
 sqlite3.connect = prohibit("sqlite3.connect")
 tempfile.mkdtemp = prohibit("tempfile.mkdtemp")
-os.mkdir = prohibit("os.mkdir")
+for primitive in {FILESYSTEM_MUTATION_PRIMITIVES!r}:
+    if hasattr(os, primitive):
+        setattr(os, primitive, prohibit("os." + primitive))
+
+allowed_read_roots = [
+    Path(os.environ["VALIDATOR_TARGET"]).parent.resolve(),
+    Path(sys.base_prefix).resolve(),
+    Path(sys.prefix).resolve(),
+]
+observing_import = True
+def audit_import(event, arguments):
+    if not observing_import:
+        return
+    if event.startswith("socket.") or (
+        event.startswith("os.") and event not in {READ_ONLY_OS_AUDIT_EVENTS!r}
+    ):
+        denied_audit_events.append(event)
+        raise RuntimeError("prohibited audit event: " + event)
+    if event == "open":
+        raw_path, mode, flags = arguments
+        candidate = Path(raw_path) if not isinstance(raw_path, int) else None
+        if candidate is not None and not candidate.is_absolute():
+            candidate = Path.cwd() / candidate
+        resolved = candidate.resolve() if candidate is not None else None
+        writing = (
+            isinstance(mode, str) and any(marker in mode for marker in "wax+")
+        ) or (
+            isinstance(flags, int) and bool(flags & (
+                os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+            ))
+        )
+        allowed = resolved is not None and any(
+            resolved == root or root in resolved.parents for root in allowed_read_roots
+        )
+        if writing or not allowed:
+            denied_audit_events.append("open")
+            raise RuntimeError("prohibited filesystem open")
+
+sys.addaudithook(audit_import)
 
 error = None
 try:
-    import sys
     sys.path.insert(0, str(Path(os.environ["VALIDATOR_TARGET"]).parent))
     spec = importlib.util.spec_from_file_location("validator_first_import", os.environ["VALIDATOR_TARGET"])
     if spec is None or spec.loader is None:
@@ -110,9 +155,11 @@ try:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 except BaseException as caught:
-    error = f"{type(caught).__name__}: {caught}"
+    error = f"{{type(caught).__name__}}: {{caught}}"
+observing_import = False
 Path(os.environ["VALIDATOR_REPORT"]).write_text(
-    json.dumps({"attempts": attempts, "error": error}), encoding="utf-8"
+    json.dumps({{"attempts": attempts, "denied_audit_events": denied_audit_events,
+                 "error": error}}), encoding="utf-8"
 )
 '''
         environment = {
@@ -145,7 +192,8 @@ Path(os.environ["VALIDATOR_REPORT"]).write_text(
             _import_fingerprint(target),
         )
         if (result.returncode or result.stdout or result.stderr or
-                observation["error"] or observation["attempts"] or after != before):
+                observation["error"] or observation["attempts"] or
+                observation["denied_audit_events"] or after != before):
             raise RuntimeError(
                 "Validator first-import probe failed: "
                 f"returncode={result.returncode}, stdout={result.stdout!r}, "
@@ -161,6 +209,8 @@ def _load_validator_after_probe(target: Path = VALIDATOR, loader=None):
         raise RuntimeError("Cannot create validator import specification")
     module = importlib.util.module_from_spec(spec)
     attempts = []
+    denied_audit_events = []
+    audit_active = [False]
 
     def prohibit(name):
         def guard(*args, **kwargs):
@@ -174,10 +224,42 @@ def _load_validator_after_probe(target: Path = VALIDATOR, loader=None):
     original_cwd = Path.cwd()
     original_environment = dict(os.environ)
     original_dont_write_bytecode = sys.dont_write_bytecode
+    allowed_read_roots = tuple({
+        target.parent.resolve(), ROOT.resolve(), Path(sys.base_prefix).resolve(),
+        Path(sys.prefix).resolve(),
+    })
+
+    def audit_import(event, arguments):
+        if not audit_active[0]:
+            return
+        if is_denied_import_audit_event(event):
+            denied_audit_events.append(event)
+            raise RuntimeError(f"prohibited audit event: {event}")
+        if event == "open":
+            raw_path, mode, flags = arguments
+            candidate = Path(raw_path) if not isinstance(raw_path, int) else None
+            if candidate is not None and not candidate.is_absolute():
+                candidate = Path.cwd() / candidate
+            resolved = candidate.resolve() if candidate is not None else None
+            writing = (
+                isinstance(mode, str) and any(marker in mode for marker in "wax+")
+            ) or (
+                isinstance(flags, int) and bool(flags & (
+                    os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+                ))
+            )
+            allowed = resolved is not None and any(
+                resolved == root or root in resolved.parents for root in allowed_read_roots
+            )
+            if writing or not allowed:
+                denied_audit_events.append("open")
+                raise RuntimeError("prohibited filesystem open")
+
+    sys.addaudithook(audit_import)
     try:
         sys.dont_write_bytecode = True
         with ExitStack() as patches, redirect_stdout(stdout), redirect_stderr(stderr):
-            for owner, name, label in (
+            guarded_primitives = [
                 (socket, "create_connection", "socket.create_connection"),
                 (socket.socket, "connect", "socket.socket.connect"),
                 (subprocess, "Popen", "subprocess.Popen"),
@@ -185,20 +267,30 @@ def _load_validator_after_probe(target: Path = VALIDATOR, loader=None):
                 (os, "system", "os.system"),
                 (sqlite3, "connect", "sqlite3.connect"),
                 (tempfile, "mkdtemp", "tempfile.mkdtemp"),
-                (os, "mkdir", "os.mkdir"),
-            ):
+            ]
+            guarded_primitives.extend(
+                (os, name, "os." + name)
+                for name in FILESYSTEM_MUTATION_PRIMITIVES if hasattr(os, name)
+            )
+            for owner, name, label in guarded_primitives:
                 patches.enter_context(mock.patch.object(owner, name, prohibit(label)))
-            (loader or spec.loader.exec_module)(module)
+            audit_active[0] = True
+            try:
+                (loader or spec.loader.exec_module)(module)
+            finally:
+                audit_active[0] = False
     finally:
         sys.dont_write_bytecode = original_dont_write_bytecode
         os.chdir(original_cwd)
         os.environ.clear()
         os.environ.update(original_environment)
     after = _import_fingerprint(target)
-    if attempts or stdout.getvalue() or stderr.getvalue() or after != before:
+    if (attempts or denied_audit_events or stdout.getvalue() or stderr.getvalue()
+            or after != before):
         raise RuntimeError(
             "Guarded validator load failed: "
-            f"attempts={attempts!r}, stdout={stdout.getvalue()!r}, "
+            f"attempts={attempts!r}, denied_audit_events={denied_audit_events!r}, "
+            f"stdout={stdout.getvalue()!r}, "
             f"stderr={stderr.getvalue()!r}, filesystem_changed={after != before}"
         )
     return module
@@ -539,8 +631,31 @@ class ImportInertnessTests(FixtureMixin, unittest.TestCase):
                 area,
             )
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("os.remove", observation["denied_audit_events"])
+            self.assertIn("os.unlink", observation["invoked"])
             self.assertTrue(target.exists())
+
+    def test_guarded_package_probe_rejects_metadata_mutation(self):
+        cases = {"utime": "os.utime(TARGET, None)"}
+        if hasattr(os, "setxattr"):
+            cases["xattr"] = "os.setxattr(TARGET, b'user.codex_test', b'value')"
+        for name, operation in cases.items():
+            with self.subTest(name=name), self.sandbox() as temporary:
+                area = Path(temporary)
+                target = area / "owned.txt"
+                target.write_text("keep", encoding="utf-8")
+                result, observation = self.run_package_probe(
+                    "import os\n"
+                    f"TARGET = {str(target)!r}\n"
+                    "try:\n"
+                    f"    {operation}\n"
+                    "except RuntimeError:\n"
+                    "    pass\n",
+                    area,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(
+                    observation["invoked"] or observation["denied_audit_events"]
+                )
 
     def test_guarded_package_probe_rejects_dns_and_connectionless_network(self):
         cases = {
@@ -573,6 +688,43 @@ class ImportInertnessTests(FixtureMixin, unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(observation["denied_audit_events"], [])
+
+    def test_validator_imports_reject_dns_and_connectionless_network(self):
+        cases = {
+            "dns": "socket.getaddrinfo('localhost', 80)",
+            "connectionless": "socket.socket().sendto(b'x', ('127.0.0.1', 9))",
+        }
+        for name, operation in cases.items():
+            with self.subTest(path="child", operation=name), self.sandbox() as temporary:
+                fixture = Path(temporary) / "network_import.py"
+                fixture.write_text(
+                    "import socket\ntry:\n"
+                    f"    {operation}\n"
+                    "except RuntimeError:\n    pass\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(RuntimeError, "denied_audit_events"):
+                    _probe_first_import(fixture)
+            with self.subTest(path="parent", operation=name), self.sandbox() as temporary:
+                fixture = Path(temporary) / "network_import.py"
+                fixture.write_text(
+                    "import socket\ntry:\n"
+                    f"    {operation}\n"
+                    "except RuntimeError:\n    pass\n",
+                    encoding="utf-8",
+                )
+                with mock.patch(
+                    __name__ + "._probe_first_import", return_value=None
+                ), self.assertRaisesRegex(RuntimeError, "denied_audit_events"):
+                    _load_validator_after_probe(fixture)
+
+    def test_parent_audit_hook_is_inert_after_validator_load(self):
+        with self.sandbox() as temporary:
+            fixture = Path(temporary) / "inert.py"
+            fixture.write_text("VALUE = 1\n", encoding="utf-8")
+            self.assertEqual(_load_validator_after_probe(fixture).VALUE, 1)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.close()
 
     def test_guarded_package_probe_rejects_unrelated_file_read(self):
         with self.sandbox() as temporary:

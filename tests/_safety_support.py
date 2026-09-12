@@ -5,6 +5,28 @@ from __future__ import annotations
 from pathlib import Path
 
 
+# Import machinery may enumerate package directories.  Other ``os.*`` audit
+# events are not required by the supported import paths and are denied.
+READ_ONLY_OS_AUDIT_EVENTS = frozenset({"os.listdir", "os.scandir"})
+
+# CPython does not audit every mutator consistently.  Patch this small set of
+# standard-library fallbacks when present; pathlib delegates to these APIs.
+FILESYSTEM_MUTATION_PRIMITIVES = (
+    "unlink", "remove", "rename", "replace", "rmdir", "mkdir", "makedirs",
+    "link", "symlink", "truncate", "chmod", "chown", "utime", "setxattr",
+    "removexattr",
+)
+
+
+def is_denied_import_audit_event(event: str) -> bool:
+    """Return whether an audit event is categorically forbidden on import."""
+
+    return (
+        event.startswith("socket.")
+        or (event.startswith("os.") and event not in READ_ONLY_OS_AUDIT_EVENTS)
+    )
+
+
 def repository_cache_dir(cache: Path, root: Path) -> Path:
     """Return the direct, non-symlink ``.cache`` child of *root*."""
 
@@ -80,15 +102,19 @@ filesystem_io = []
 denied_audit_events = []
 observing_import = True
 
-FILESYSTEM_MUTATION_EVENTS = frozenset({{
-    "os.remove", "os.rename", "os.rmdir", "os.mkdir", "os.link",
-    "os.symlink", "os.truncate", "os.chmod", "os.chown",
-}})
+READ_ONLY_OS_AUDIT_EVENTS = frozenset({READ_ONLY_OS_AUDIT_EVENTS!r})
+FILESYSTEM_MUTATION_PRIMITIVES = {FILESYSTEM_MUTATION_PRIMITIVES!r}
+
+for primitive in FILESYSTEM_MUTATION_PRIMITIVES:
+    if hasattr(os, primitive):
+        setattr(os, primitive, prohibited("os." + primitive))
 
 def observe_import_activity(event, arguments):
     if not observing_import:
         return
-    if event in FILESYSTEM_MUTATION_EVENTS or event.startswith("socket."):
+    if event.startswith("socket.") or (
+        event.startswith("os.") and event not in READ_ONLY_OS_AUDIT_EVENTS
+    ):
         denied_audit_events.append(event)
         raise RuntimeError(f"prohibited audit event: {{event}}")
     if event != "open":
@@ -133,4 +159,6 @@ if any(item["write"] or not item["allowed"] for item in filesystem_io):
     raise RuntimeError("prohibited filesystem I/O observed during package import")
 if denied_audit_events:
     raise RuntimeError("prohibited audit event observed during package import")
+if invoked:
+    raise RuntimeError("prohibited primitive observed during package import")
 """
