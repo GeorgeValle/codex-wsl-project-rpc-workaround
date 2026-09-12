@@ -72,7 +72,16 @@ def selected_source_files(root: Path = ROOT, source: Path = SOURCE_ROOT) -> list
         _regular_file(path, "Top-level packaging input")
         selected.append(path)
 
-    for current, directories, files in os.walk(resolved_source, followlinks=False):
+    def fail_walk(error: OSError) -> None:
+        raise ValidationError(
+            f"Cannot scan authored source directory: {error.filename}"
+        ) from error
+
+    for current, directories, files in os.walk(
+        resolved_source,
+        followlinks=False,
+        onerror=fail_walk,
+    ):
         current_path = Path(current)
         kept_directories = []
         for name in directories:

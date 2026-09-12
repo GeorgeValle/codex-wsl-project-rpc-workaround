@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -16,12 +18,118 @@ from _safety_support import repository_cache_dir
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / ".cache"
-SPEC = importlib.util.spec_from_file_location(
-    "validate_packaging", ROOT / "tests/validate_packaging.py"
+VALIDATOR = ROOT / "tests/validate_packaging.py"
+IMPORT_PROBE_TIMEOUT_SECONDS = 10
+validate_packaging = None
+
+
+def _tree_snapshot(path: Path) -> set[Path]:
+    return {item.relative_to(path) for item in path.rglob("*")}
+
+
+def _probe_first_import(target: Path) -> None:
+    """Check a trusted test module's first import under targeted guards."""
+
+    cache = repository_cache_dir(CACHE, ROOT)
+    with tempfile.TemporaryDirectory(prefix="validator-import-", dir=cache) as temporary:
+        sandbox = Path(temporary)
+        work = sandbox / "work"
+        home = sandbox / "home"
+        temp_root = sandbox / "tmp"
+        for directory in (work, home, temp_root):
+            directory.mkdir()
+        report = sandbox / "report.json"
+        report.touch()
+        before = _tree_snapshot(sandbox)
+        probe = r'''
+import importlib.util
+import json
+import os
+from pathlib import Path
+import socket
+import sqlite3
+import subprocess
+import tempfile
+
+attempts = []
+def prohibit(name):
+    def guard(*args, **kwargs):
+        attempts.append(name)
+        raise RuntimeError("prohibited operation: " + name)
+    return guard
+
+socket.create_connection = prohibit("socket.create_connection")
+socket.socket.connect = prohibit("socket.socket.connect")
+subprocess.Popen = prohibit("subprocess.Popen")
+os.system = prohibit("os.system")
+sqlite3.connect = prohibit("sqlite3.connect")
+tempfile.mkdtemp = prohibit("tempfile.mkdtemp")
+os.mkdir = prohibit("os.mkdir")
+
+error = None
+try:
+    import sys
+    sys.path.insert(0, str(Path(os.environ["VALIDATOR_TARGET"]).parent))
+    spec = importlib.util.spec_from_file_location("validator_first_import", os.environ["VALIDATOR_TARGET"])
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot create import specification")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+except BaseException as caught:
+    error = f"{type(caught).__name__}: {caught}"
+Path(os.environ["VALIDATOR_REPORT"]).write_text(
+    json.dumps({"attempts": attempts, "error": error}), encoding="utf-8"
 )
-assert SPEC and SPEC.loader
-validate_packaging = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(validate_packaging)
+'''
+        environment = {
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "APPDATA": str(home),
+            "LOCALAPPDATA": str(home),
+            "TMPDIR": str(temp_root),
+            "TEMP": str(temp_root),
+            "TMP": str(temp_root),
+            "VALIDATOR_REPORT": str(report),
+            "VALIDATOR_TARGET": str(target),
+        }
+        try:
+            result = subprocess.run(
+                [sys.executable, "-S", "-B", "-c", probe],
+                cwd=work,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                shell=False,
+                timeout=IMPORT_PROBE_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("Validator first-import probe timed out") from error
+        observation = json.loads(report.read_text(encoding="utf-8"))
+        after = _tree_snapshot(sandbox)
+        if (result.returncode or result.stdout or result.stderr or
+                observation["error"] or observation["attempts"] or after != before):
+            raise RuntimeError(
+                "Validator first-import probe failed: "
+                f"returncode={result.returncode}, stdout={result.stdout!r}, "
+                f"stderr={result.stderr!r}, observation={observation!r}, "
+                f"artifacts={sorted(map(str, after - before))!r}"
+            )
+
+
+def _load_validator_after_probe(target: Path = VALIDATOR, loader=None):
+    _probe_first_import(target)
+    spec = importlib.util.spec_from_file_location("validate_packaging", target)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Cannot create validator import specification")
+    module = importlib.util.module_from_spec(spec)
+    (loader or spec.loader.exec_module)(module)
+    return module
+
+
+def setUpModule() -> None:
+    global validate_packaging
+    validate_packaging = _load_validator_after_probe()
 
 
 class FixtureMixin:
@@ -50,6 +158,34 @@ class FixtureMixin:
 
 
 class SourceSelectionTests(FixtureMixin, unittest.TestCase):
+    def test_unreadable_directory_stops_selection_and_orchestration(self):
+        with self.sandbox() as temporary:
+            area = Path(temporary)
+            root, source, wheelhouse = self.project_fixture(area)
+            blocked = source / "codex_wsl_rpc/blocked"
+            blocked.mkdir()
+            original_error = PermissionError(13, "denied", str(blocked))
+            real_scandir = os.scandir
+
+            def fail_specific(path):
+                if Path(path) == blocked:
+                    raise original_error
+                return real_scandir(path)
+
+            with mock.patch.object(validate_packaging.os, "scandir", side_effect=fail_specific):
+                with self.assertRaises(validate_packaging.ValidationError) as raised:
+                    validate_packaging.selected_source_files(root, source)
+                self.assertIs(raised.exception.__cause__, original_error)
+
+                runner = mock.Mock()
+                workspace = area / "workspace"
+                workspace.mkdir()
+                with self.assertRaises(validate_packaging.ValidationError):
+                    validate_packaging.execute(
+                        workspace, runner=runner, root=root, wheelhouse=wheelhouse
+                    )
+                runner.assert_not_called()
+
     def test_source_root_and_nested_symlinks_fail_before_runner(self):
         for nested in (False, True):
             with self.subTest(nested=nested), self.sandbox() as temporary:
@@ -232,17 +368,29 @@ class OrchestrationTests(FixtureMixin, unittest.TestCase):
                 validate_packaging.run_checked(timeout, ["python"], cwd=area, environment=environment)
 
 
-class ImportInertnessTests(unittest.TestCase):
-    def test_import_does_not_create_packaging_workspace(self):
-        cache = repository_cache_dir(CACHE, ROOT)
-        before = set(cache.iterdir())
-        spec = importlib.util.spec_from_file_location(
-            "validate_packaging_second_import", ROOT / "tests/validate_packaging.py"
-        )
-        assert spec and spec.loader
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        self.assertEqual(set(cache.iterdir()), before)
+class ImportInertnessTests(FixtureMixin, unittest.TestCase):
+    def test_first_import_probe_rejects_directory_creation(self):
+        with self.sandbox() as temporary:
+            fixture = Path(temporary) / "unsafe_import.py"
+            fixture.write_text(
+                "import tempfile\n"
+                "try:\n"
+                "    tempfile.mkdtemp(prefix='unsafe-import-')\n"
+                "except RuntimeError:\n"
+                "    pass\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "tempfile.mkdtemp"):
+                _probe_first_import(fixture)
+
+    def test_failed_probe_prevents_parent_loader(self):
+        with self.sandbox() as temporary:
+            fixture = Path(temporary) / "unsafe_import.py"
+            fixture.write_text("import os\nos.mkdir('unsafe')\n", encoding="utf-8")
+            loader = mock.Mock()
+            with self.assertRaises(RuntimeError):
+                _load_validator_after_probe(fixture, loader=loader)
+            loader.assert_not_called()
 
 
 if __name__ == "__main__":
