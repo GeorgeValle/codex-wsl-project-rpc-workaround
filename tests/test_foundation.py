@@ -23,13 +23,32 @@ CACHE = ROOT / ".cache"
 def repository_cache_dir(cache: Path = CACHE, root: Path = ROOT) -> Path:
     """Return a validated repository-local cache directory."""
 
-    resolved_root = root.resolve()
+    resolved_root = root.resolve(strict=True)
     if cache.is_symlink():
         raise AssertionError("Repository cache path must not be a symbolic link")
-    if cache.exists() and not cache.is_dir():
-        raise AssertionError("Repository cache path exists but is not a directory")
 
-    cache.mkdir(exist_ok=True)
+    if cache.exists():
+        if not cache.is_dir():
+            raise AssertionError("Repository cache path exists but is not a directory")
+
+        resolved_cache = cache.resolve(strict=True)
+        if resolved_cache.parent != resolved_root:
+            raise AssertionError(
+                "Repository cache path resolves outside the repository root"
+            )
+
+        return resolved_cache
+
+    resolved_parent = cache.parent.resolve(strict=True)
+    if resolved_parent != resolved_root:
+        raise AssertionError(
+            "Repository cache parent resolves outside the repository root"
+        )
+
+    cache.mkdir()
+    if cache.is_symlink():
+        raise AssertionError("Repository cache path became a symbolic link")
+
     resolved_cache = cache.resolve(strict=True)
     if resolved_cache.parent != resolved_root:
         raise AssertionError(
@@ -122,6 +141,21 @@ class RepositoryCacheTests(unittest.TestCase):
 
             with self.assertRaisesRegex(AssertionError, "is not a directory"):
                 repository_cache_dir(cache=test_cache, root=test_root)
+
+    def test_out_of_root_cache_is_rejected_before_creation(self) -> None:
+        cache = repository_cache_dir()
+        with tempfile.TemporaryDirectory(prefix="cache-boundary-", dir=cache) as temporary:
+            test_sandbox = Path(temporary)
+            allowed_root = test_sandbox / "allowed-root"
+            other_root = test_sandbox / "other-root"
+            allowed_root.mkdir()
+            other_root.mkdir()
+            unauthorized_cache = other_root / ".cache"
+
+            with self.assertRaisesRegex(AssertionError, "parent resolves outside"):
+                repository_cache_dir(cache=unauthorized_cache, root=allowed_root)
+
+            self.assertFalse(unauthorized_cache.exists())
 
     def test_symbolic_link_cache_path_is_rejected(self) -> None:
         cache = repository_cache_dir()
