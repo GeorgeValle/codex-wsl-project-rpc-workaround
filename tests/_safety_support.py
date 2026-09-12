@@ -69,6 +69,7 @@ metadata_result = {
     return f"""
 import importlib.metadata
 import encodings.idna
+import _thread
 import json
 import os
 from pathlib import Path
@@ -76,6 +77,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 
 invoked = []
 def prohibited(name):
@@ -89,6 +91,9 @@ socket.socket.connect = prohibited("socket.socket.connect")
 subprocess.Popen = prohibited("subprocess.Popen")
 os.system = prohibited("os.system")
 sqlite3.connect = prohibited("sqlite3.connect")
+
+original_thread_start = threading.Thread.start
+original_start_new_thread = _thread.start_new_thread
 
 source = os.environ.get("FOUNDATION_SRC")
 if source:
@@ -141,8 +146,14 @@ def observe_import_activity(event, arguments):
         raise RuntimeError(f"prohibited filesystem open: {{path}}")
 
 sys.addaudithook(observe_import_activity)
-import codex_wsl_rpc
-observing_import = False
+threading.Thread.start = prohibited("threading.Thread.start")
+_thread.start_new_thread = prohibited("_thread.start_new_thread")
+try:
+    import codex_wsl_rpc
+finally:
+    observing_import = False
+    threading.Thread.start = original_thread_start
+    _thread.start_new_thread = original_start_new_thread
 metadata_result = None
 {metadata_probe}
 Path(os.environ["FOUNDATION_REPORT"]).write_text(

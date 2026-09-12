@@ -34,6 +34,28 @@ IMPORT_PROBE_TIMEOUT_SECONDS = 10
 validate_packaging = None
 
 
+def _validator_import_environment(
+    *, home: Path, temp_root: Path, target: Path | None = None,
+    report: Path | None = None,
+) -> dict[str, str]:
+    """Return the allowlisted environment for a validator module import."""
+
+    environment = {
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "APPDATA": str(home),
+        "LOCALAPPDATA": str(home),
+        "TMPDIR": str(temp_root),
+        "TEMP": str(temp_root),
+        "TMP": str(temp_root),
+    }
+    if target is not None:
+        environment["VALIDATOR_TARGET"] = str(target)
+    if report is not None:
+        environment["VALIDATOR_REPORT"] = str(report)
+    return environment
+
+
 def _tree_fingerprint(
     path: Path, *, ignored: frozenset[Path] = frozenset()
 ) -> tuple[tuple[str, str, str], ...]:
@@ -162,17 +184,9 @@ Path(os.environ["VALIDATOR_REPORT"]).write_text(
                  "error": error}}), encoding="utf-8"
 )
 '''
-        environment = {
-            "HOME": str(home),
-            "USERPROFILE": str(home),
-            "APPDATA": str(home),
-            "LOCALAPPDATA": str(home),
-            "TMPDIR": str(temp_root),
-            "TEMP": str(temp_root),
-            "TMP": str(temp_root),
-            "VALIDATOR_REPORT": str(report),
-            "VALIDATOR_TARGET": str(target),
-        }
+        environment = _validator_import_environment(
+            home=home, temp_root=temp_root, target=target, report=report
+        )
         try:
             result = subprocess.run(
                 [sys.executable, "-S", "-B", "-c", probe],
@@ -222,7 +236,6 @@ def _load_validator_after_probe(target: Path = VALIDATOR, loader=None):
     stdout = io.StringIO()
     stderr = io.StringIO()
     original_cwd = Path.cwd()
-    original_environment = dict(os.environ)
     original_dont_write_bytecode = sys.dont_write_bytecode
     allowed_read_roots = tuple({
         target.parent.resolve(), ROOT.resolve(), Path(sys.base_prefix).resolve(),
@@ -258,7 +271,12 @@ def _load_validator_after_probe(target: Path = VALIDATOR, loader=None):
     sys.addaudithook(audit_import)
     try:
         sys.dont_write_bytecode = True
-        with ExitStack() as patches, redirect_stdout(stdout), redirect_stderr(stderr):
+        safe_environment = _validator_import_environment(
+            home=target.parent, temp_root=target.parent
+        )
+        with (ExitStack() as patches, redirect_stdout(stdout),
+              redirect_stderr(stderr),
+              mock.patch.dict(os.environ, safe_environment, clear=True)):
             guarded_primitives = [
                 (socket, "create_connection", "socket.create_connection"),
                 (socket.socket, "connect", "socket.socket.connect"),
@@ -282,8 +300,6 @@ def _load_validator_after_probe(target: Path = VALIDATOR, loader=None):
     finally:
         sys.dont_write_bytecode = original_dont_write_bytecode
         os.chdir(original_cwd)
-        os.environ.clear()
-        os.environ.update(original_environment)
     after = _import_fingerprint(target)
     if (attempts or denied_audit_events or stdout.getvalue() or stderr.getvalue()
             or after != before):
@@ -689,6 +705,33 @@ class ImportInertnessTests(FixtureMixin, unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(observation["denied_audit_events"], [])
 
+    def test_guarded_package_probe_rejects_thread_start(self):
+        cases = {
+            "threading": (
+                "import threading\n"
+                "thread = threading.Thread(target=body)\n"
+                "thread.start()\n",
+                "threading.Thread.start",
+            ),
+            "_thread": ("import _thread\n_thread.start_new_thread(body, ())\n",
+                        "_thread.start_new_thread"),
+        }
+        for name, (start, expected) in cases.items():
+            with self.subTest(name=name), self.sandbox() as temporary:
+                area = Path(temporary)
+                marker = area / "thread-body-ran"
+                result, observation = self.run_package_probe(
+                    "from pathlib import Path\n"
+                    f"def body():\n    Path({str(marker)!r}).touch()\n"
+                    "try:\n"
+                    + "".join(f"    {line}\n" for line in start.splitlines())
+                    + "except RuntimeError:\n    pass\n",
+                    area,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, observation["invoked"])
+                self.assertFalse(marker.exists())
+
     def test_validator_imports_reject_dns_and_connectionless_network(self):
         cases = {
             "dns": "socket.getaddrinfo('localhost', 80)",
@@ -782,25 +825,26 @@ class ImportInertnessTests(FixtureMixin, unittest.TestCase):
             inert.write_text("VALUE = 1\n", encoding="utf-8")
             self.assertEqual(_load_validator_after_probe(inert).VALUE, 1)
 
-    def test_parent_load_rejects_environment_conditional_operation_and_restores_guards(self):
+    def test_parent_load_sanitizes_and_restores_environment(self):
         with self.sandbox() as temporary:
-            fixture = Path(temporary) / "conditional_import.py"
+            fixture = Path(temporary) / "environment_import.py"
             fixture.write_text(
                 "import os\n"
-                "if os.environ.get('VALIDATOR_PARENT_ATTEMPT'):\n"
-                "    try:\n"
-                "        os.system('never-executed')\n"
-                "    except RuntimeError:\n"
-                "        pass\n",
+                "AMBIENT_VISIBLE = 'VALIDATOR_AMBIENT_FIXTURE' in os.environ\n",
                 encoding="utf-8",
             )
-            original_system = os.system
-            with mock.patch.dict(os.environ, {"VALIDATOR_PARENT_ATTEMPT": "1"}):
-                with self.assertRaisesRegex(RuntimeError, "os.system"):
-                    _load_validator_after_probe(fixture)
-            self.assertIs(os.system, original_system)
-            module = _load_validator_after_probe(fixture)
-            self.assertIsNotNone(module)
+            with mock.patch.dict(os.environ, {"VALIDATOR_AMBIENT_FIXTURE": "present"}):
+                module = _load_validator_after_probe(fixture)
+                self.assertFalse(module.AMBIENT_VISIBLE)
+                self.assertEqual(os.environ["VALIDATOR_AMBIENT_FIXTURE"], "present")
+
+                def failing_loader(module):
+                    self.assertNotIn("VALIDATOR_AMBIENT_FIXTURE", os.environ)
+                    raise ValueError("expected load failure")
+
+                with self.assertRaisesRegex(ValueError, "expected load failure"):
+                    _load_validator_after_probe(fixture, loader=failing_loader)
+                self.assertEqual(os.environ["VALIDATOR_AMBIENT_FIXTURE"], "present")
 
     def test_first_import_probe_rejects_directory_creation(self):
         with self.sandbox() as temporary:
