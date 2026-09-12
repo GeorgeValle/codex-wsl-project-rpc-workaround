@@ -44,9 +44,17 @@ pinned setuptools wheel `setuptools-84.0.0-py3-none-any.whl` as its sole
 filesystem entry, reject that entry unless it is a non-symlink regular file,
 and verify SHA-256
 `51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670`.
-Only after those checks pass may it create a fresh disposable venv and run:
+Only after those checks pass may validation use
+`repository_disposable_dir()` to boundary-check and create the exact
+non-symlink directory `.cache/codex-wsl-rpc-packaging-tmp`. It exports
+`TMPDIR`, `TEMP`, and `TMP` to that validated absolute path before creating the
+fresh disposable venv, invoking pip, or validating installed metadata. The
+editable install is:
 
 ```console
+TMPDIR="$PACKAGING_TMP" \
+TEMP="$PACKAGING_TMP" \
+TMP="$PACKAGING_TMP" \
 .cache/codex-wsl-rpc-packaging-venv/bin/python \
   -m pip \
   --isolated \
@@ -72,9 +80,15 @@ installation remains prohibited.
 Validation then runs from a controlled directory outside the repository root
 and uses `importlib.metadata` to check the checkout import origin, distribution
 name/version, `Requires-Python`, empty `Requires-Dist`, and absent
-`console_scripts`. The validation performs no package-index or runtime
+`console_scripts`, while the same temporary-directory variables remain set.
+The required order is cache validation, wheelhouse validation, exact wheel and
+digest validation, packaging-temp validation/creation, temporary-variable
+export, clean venv creation, editable install, metadata validation, and exact
+cleanup. The validation performs no package-index or runtime
 dependency resolution and no automatic tooling download. Only the exact
-disposable venv may be removed afterward; the provisioned wheelhouse remains.
+disposable venv and packaging-temp directory may be removed afterward, after
+each exact path is revalidated as repository-local and non-symlinked. The
+cache directory and provisioned wheelhouse remain.
 
 ## Acceptance evidence and limitations
 

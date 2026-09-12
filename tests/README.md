@@ -41,10 +41,25 @@ The mandatory order is:
 3. require exactly one filesystem entry and validate it as the approved
    non-symlink regular setuptools wheel;
 4. validate its SHA-256;
-5. create a fresh disposable packaging venv; and
-6. only then invoke pip as follows, with build isolation enabled:
+5. validate and create the exact non-symlink repository-local temporary
+   directory `.cache/codex-wsl-rpc-packaging-tmp` with
+   `repository_disposable_dir()`;
+6. export `TMPDIR`, `TEMP`, and `TMP` to that validated absolute path;
+7. create a fresh disposable packaging venv with those variables set;
+8. invoke pip with those variables set and build isolation enabled;
+9. validate installed metadata with those variables still set; and
+10. after revalidating both exact paths, remove only the disposable venv and
+    packaging temporary directory.
+
+The venv creation is run as `TMPDIR="$PACKAGING_TMP" TEMP="$PACKAGING_TMP"
+TMP="$PACKAGING_TMP" python3 -m venv
+.cache/codex-wsl-rpc-packaging-venv`, where `PACKAGING_TMP` is the validated
+absolute path. The editable install is:
 
 ```console
+TMPDIR="$PACKAGING_TMP" \
+TEMP="$PACKAGING_TMP" \
+TMP="$PACKAGING_TMP" \
 .cache/codex-wsl-rpc-packaging-venv/bin/python \
   -m pip \
   --isolated \
@@ -64,10 +79,14 @@ candidate, pinned-filename, and digest checks above.
 After installation, validation must run outside the repository root and check
 the import origin plus distribution name, version, `Requires-Python`, empty
 `Requires-Dist`, and absent `console_scripts` with `importlib.metadata`.
+`TMPDIR`, `TEMP`, and `TMP` remain set to `PACKAGING_TMP` for that validation.
 The validation task performs no package-index resolution, runtime dependency
 resolution, or uncontrolled tooling download. Pip build isolation may install
 the approved build tool into its ephemeral environment only from the validated,
 pinned, hash-verified local artifact.
+Cleanup revalidates the exact non-symlink repository-local paths and removes
+only `.cache/codex-wsl-rpc-packaging-venv` and
+`.cache/codex-wsl-rpc-packaging-tmp`; it retains `.cache` and the wheelhouse.
 
 Tests are bounded and deterministic. They do not:
 

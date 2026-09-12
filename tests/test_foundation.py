@@ -21,6 +21,7 @@ SRC = (ROOT / "src").resolve()
 PACKAGE = SRC / "codex_wsl_rpc"
 CACHE = ROOT / ".cache"
 WHEELHOUSE = CACHE / "codex-wsl-rpc-wheelhouse"
+PACKAGING_TMP = CACHE / "codex-wsl-rpc-packaging-tmp"
 SETUPTOOLS_VERSION = "84.0.0"
 SETUPTOOLS_WHEEL = "setuptools-84.0.0-py3-none-any.whl"
 SETUPTOOLS_SHA256 = (
@@ -65,6 +66,40 @@ def repository_cache_dir(cache: Path = CACHE, root: Path = ROOT) -> Path:
         )
 
     return resolved_cache
+
+
+def repository_disposable_dir(
+    path: Path,
+    cache: Path = CACHE,
+    root: Path = ROOT,
+) -> Path:
+    """Validate and create an exact disposable directory under the cache."""
+
+    resolved_cache = repository_cache_dir(cache=cache, root=root)
+    if path.is_symlink():
+        raise AssertionError("Disposable path must not be a symbolic link")
+
+    if path.exists():
+        if not path.is_dir():
+            raise AssertionError("Disposable path exists but is not a directory")
+
+        resolved_path = path.resolve(strict=True)
+        if resolved_path.parent != resolved_cache:
+            raise AssertionError("Disposable path resolves outside the repository cache")
+        return resolved_path
+
+    resolved_parent = path.parent.resolve(strict=True)
+    if resolved_parent != resolved_cache:
+        raise AssertionError("Disposable path parent is not the repository cache")
+
+    path.mkdir()
+    if path.is_symlink():
+        raise AssertionError("Disposable path became a symbolic link")
+
+    resolved_path = path.resolve(strict=True)
+    if resolved_path.parent != resolved_cache:
+        raise AssertionError("Disposable path resolves outside the repository cache")
+    return resolved_path
 
 
 def validate_setuptools_wheelhouse(
@@ -400,6 +435,66 @@ class SetuptoolsWheelhouseTests(unittest.TestCase):
                 validate_setuptools_wheelhouse(
                     wheelhouse=wheelhouse, cache=cache, root=root
                 )
+
+
+class RepositoryDisposableDirectoryTests(unittest.TestCase):
+    def disposable_sandbox(self) -> tempfile.TemporaryDirectory[str]:
+        return tempfile.TemporaryDirectory(
+            prefix="disposable-boundary-", dir=repository_cache_dir()
+        )
+
+    def test_valid_directory_under_controlled_cache_is_accepted(self) -> None:
+        with self.disposable_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            cache.mkdir()
+            disposable = cache / "packaging-tmp"
+
+            self.assertEqual(
+                repository_disposable_dir(disposable, cache=cache, root=root),
+                disposable.resolve(strict=True),
+            )
+
+    def test_symbolic_link_disposable_path_is_rejected(self) -> None:
+        with self.disposable_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            cache.mkdir()
+            target = cache / "controlled-target"
+            target.mkdir()
+            disposable = cache / "packaging-tmp"
+            try:
+                disposable.symlink_to(target, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"symbolic-link creation is unavailable: {error}")
+
+            with self.assertRaisesRegex(AssertionError, "must not be a symbolic link"):
+                repository_disposable_dir(disposable, cache=cache, root=root)
+
+    def test_out_of_cache_path_is_rejected_before_creation(self) -> None:
+        with self.disposable_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            cache.mkdir()
+            other = root / "other"
+            other.mkdir()
+            disposable = other / "packaging-tmp"
+
+            with self.assertRaisesRegex(AssertionError, "parent is not"):
+                repository_disposable_dir(disposable, cache=cache, root=root)
+
+            self.assertFalse(disposable.exists())
+
+    def test_existing_non_directory_disposable_path_is_rejected(self) -> None:
+        with self.disposable_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            cache.mkdir()
+            disposable = cache / "packaging-tmp"
+            disposable.write_text("not a directory", encoding="utf-8")
+
+            with self.assertRaisesRegex(AssertionError, "is not a directory"):
+                repository_disposable_dir(disposable, cache=cache, root=root)
 
 
 class InertImportTests(unittest.TestCase):

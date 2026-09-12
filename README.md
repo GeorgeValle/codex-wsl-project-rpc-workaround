@@ -125,9 +125,12 @@ separate validation. Codex Cloud setup pre-provisions the pinned
 `.cache/codex-wsl-rpc-wheelhouse/`; this pre-task environment provisioning is
 not part of the package's runtime dependency model. Validation creates the
 exact ignored repository-local environment
-`.cache/codex-wsl-rpc-packaging-venv`, then uses pip build isolation with
-`--isolated`, `--no-index`, the local wheelhouse, `--no-cache-dir`, and
-`--no-deps`. Build isolation may install the explicitly approved build tool
+`.cache/codex-wsl-rpc-packaging-venv` and validates the exact non-symlink
+temporary directory `.cache/codex-wsl-rpc-packaging-tmp`. It sets `TMPDIR`,
+`TEMP`, and `TMP` to that validated absolute path before venv creation, pip
+build isolation, and metadata checks. Pip uses `--isolated`, `--no-index`, the
+local wheelhouse, `--no-cache-dir`, and `--no-deps`. Build isolation may install
+the explicitly approved build tool
 into an ephemeral environment only from the pinned, provenance-controlled,
 hash-verified local artifact; it does not use a package index or add a runtime
 dependency. No functional Codex workaround exists yet.
