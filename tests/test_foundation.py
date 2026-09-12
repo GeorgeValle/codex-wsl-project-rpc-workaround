@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
@@ -22,6 +23,7 @@ PACKAGE = SRC / "codex_wsl_rpc"
 CACHE = ROOT / ".cache"
 WHEELHOUSE = CACHE / "codex-wsl-rpc-wheelhouse"
 PACKAGING_TMP = CACHE / "codex-wsl-rpc-packaging-tmp"
+PACKAGING_VENV = CACHE / "codex-wsl-rpc-packaging-venv"
 SETUPTOOLS_VERSION = "84.0.0"
 SETUPTOOLS_WHEEL = "setuptools-84.0.0-py3-none-any.whl"
 SETUPTOOLS_SHA256 = (
@@ -100,6 +102,40 @@ def repository_disposable_dir(
     if resolved_path.parent != resolved_cache:
         raise AssertionError("Disposable path resolves outside the repository cache")
     return resolved_path
+
+
+def prepare_disposable_directory(
+    path: Path,
+    *,
+    remove_existing: bool = False,
+    cache: Path = CACHE,
+    root: Path = ROOT,
+) -> Path:
+    """Ensure an exact cache-local disposable directory is absent."""
+
+    resolved_cache = repository_cache_dir(cache=cache, root=root)
+    if path.name != PACKAGING_VENV.name:
+        raise AssertionError("Disposable path is not the packaging venv")
+    if path.is_symlink():
+        raise AssertionError("Disposable path must not be a symbolic link")
+
+    resolved_parent = path.parent.resolve(strict=True)
+    if resolved_parent != resolved_cache:
+        raise AssertionError("Disposable path parent is not the repository cache")
+
+    if path.exists():
+        if not path.is_dir():
+            raise AssertionError("Disposable path exists but is not a directory")
+        resolved_path = path.resolve(strict=True)
+        if resolved_path.parent != resolved_cache:
+            raise AssertionError("Disposable path resolves outside the repository cache")
+        if not remove_existing:
+            raise AssertionError("Disposable path must be absent before fresh creation")
+        shutil.rmtree(resolved_path)
+
+    if path.exists() or path.is_symlink():
+        raise AssertionError("Disposable path was not removed before fresh creation")
+    return path
 
 
 def validate_setuptools_wheelhouse(
@@ -495,6 +531,88 @@ class RepositoryDisposableDirectoryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(AssertionError, "is not a directory"):
                 repository_disposable_dir(disposable, cache=cache, root=root)
+
+
+class PrepareDisposableDirectoryTests(unittest.TestCase):
+    def disposable_sandbox(self) -> tempfile.TemporaryDirectory[str]:
+        return tempfile.TemporaryDirectory(
+            prefix="prepare-disposable-", dir=repository_cache_dir()
+        )
+
+    def test_absent_validated_path_is_accepted(self) -> None:
+        with self.disposable_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            cache.mkdir()
+            path = cache / PACKAGING_VENV.name
+
+            self.assertEqual(
+                prepare_disposable_directory(path, cache=cache, root=root), path
+            )
+            self.assertFalse(path.exists())
+
+    def test_exact_existing_directory_can_be_removed(self) -> None:
+        with self.disposable_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            path = cache / PACKAGING_VENV.name
+            path.mkdir(parents=True)
+            (path / "stale-metadata").write_text("stale", encoding="utf-8")
+
+            self.assertEqual(
+                prepare_disposable_directory(
+                    path, remove_existing=True, cache=cache, root=root
+                ),
+                path,
+            )
+            self.assertFalse(path.exists())
+
+    def test_symbolic_link_path_is_rejected(self) -> None:
+        with self.disposable_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            cache.mkdir()
+            target = cache / "controlled-target"
+            target.mkdir()
+            path = cache / PACKAGING_VENV.name
+            try:
+                path.symlink_to(target, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"symbolic-link creation is unavailable: {error}")
+
+            with self.assertRaisesRegex(AssertionError, "symbolic link"):
+                prepare_disposable_directory(
+                    path, remove_existing=True, cache=cache, root=root
+                )
+            self.assertTrue(target.is_dir())
+
+    def test_out_of_cache_path_is_rejected_before_deletion(self) -> None:
+        with self.disposable_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            cache.mkdir()
+            path = root / "other" / PACKAGING_VENV.name
+            path.mkdir(parents=True)
+
+            with self.assertRaisesRegex(AssertionError, "parent is not"):
+                prepare_disposable_directory(
+                    path, remove_existing=True, cache=cache, root=root
+                )
+            self.assertTrue(path.is_dir())
+
+    def test_existing_non_directory_is_rejected(self) -> None:
+        with self.disposable_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            cache.mkdir()
+            path = cache / PACKAGING_VENV.name
+            path.write_text("not a directory", encoding="utf-8")
+
+            with self.assertRaisesRegex(AssertionError, "is not a directory"):
+                prepare_disposable_directory(
+                    path, remove_existing=True, cache=cache, root=root
+                )
+            self.assertTrue(path.is_file())
 
 
 class InertImportTests(unittest.TestCase):

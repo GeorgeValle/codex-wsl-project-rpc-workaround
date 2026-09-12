@@ -48,8 +48,12 @@ Only after those checks pass may validation use
 `repository_disposable_dir()` to boundary-check and create the exact
 non-symlink directory `.cache/codex-wsl-rpc-packaging-tmp`. It exports
 `TMPDIR`, `TEMP`, and `TMP` to that validated absolute path before creating the
-fresh disposable venv, invoking pip, or validating installed metadata. The
-editable install is:
+fresh disposable venv, invoking pip, or validating installed metadata. Before
+venv creation, `prepare_disposable_directory()` validates the exact venv path.
+A stale directory is removed only with explicit opt-in after symlink, type,
+and exact cache-parent validation; symlinked, non-directory, and out-of-cache
+paths fail closed. Creation occurs only after the path is confirmed absent.
+The editable install is:
 
 ```console
 TMPDIR="$PACKAGING_TMP" \
@@ -83,8 +87,9 @@ name/version, `Requires-Python`, empty `Requires-Dist`, and absent
 `console_scripts`, while the same temporary-directory variables remain set.
 The required order is cache validation, wheelhouse validation, exact wheel and
 digest validation, packaging-temp validation/creation, temporary-variable
-export, clean venv creation, editable install, metadata validation, and exact
-cleanup. The validation performs no package-index or runtime
+export, exact stale-venv validation and removal, confirmation that the venv
+path is absent, clean venv creation, editable install, metadata validation,
+and exact cleanup. The validation performs no package-index or runtime
 dependency resolution and no automatic tooling download. Only the exact
 disposable venv and packaging-temp directory may be removed afterward, after
 each exact path is revalidated as repository-local and non-symlinked. The

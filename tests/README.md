@@ -45,13 +45,19 @@ The mandatory order is:
    directory `.cache/codex-wsl-rpc-packaging-tmp` with
    `repository_disposable_dir()`;
 6. export `TMPDIR`, `TEMP`, and `TMP` to that validated absolute path;
-7. create a fresh disposable packaging venv with those variables set;
-8. invoke pip with those variables set and build isolation enabled;
-9. validate installed metadata with those variables still set; and
-10. after revalidating both exact paths, remove only the disposable venv and
+7. call `prepare_disposable_directory()` for the exact packaging-venv path,
+   opting into removal if it already exists; this rejects symlinks,
+   non-directories, and out-of-cache paths, removes only the exact validated
+   directory, and confirms the path is absent;
+8. create a fresh disposable packaging venv with those variables set;
+9. invoke pip with those variables set and build isolation enabled;
+10. validate installed metadata with those variables still set; and
+11. after revalidating both exact paths, remove only the disposable venv and
     packaging temporary directory.
 
-The venv creation is run as `TMPDIR="$PACKAGING_TMP" TEMP="$PACKAGING_TMP"
+The venv is never created over an existing directory or reused. After its
+exact path has been boundary-validated and confirmed absent, creation is run
+as `TMPDIR="$PACKAGING_TMP" TEMP="$PACKAGING_TMP"
 TMP="$PACKAGING_TMP" python3 -m venv
 .cache/codex-wsl-rpc-packaging-venv`, where `PACKAGING_TMP` is the validated
 absolute path. The editable install is:
