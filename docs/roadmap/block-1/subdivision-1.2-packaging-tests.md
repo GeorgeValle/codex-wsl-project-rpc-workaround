@@ -40,8 +40,9 @@ repository-local environment `.cache/codex-wsl-rpc-packaging-venv`.
 Wheelhouse validation is a mandatory precondition to executing pip. In order,
 the task must validate the repository cache boundary, reject a missing,
 non-directory, symbolic-link, or out-of-cache wheelhouse, require exactly the
-pinned setuptools candidate `setuptools-84.0.0-py3-none-any.whl`, and verify
-SHA-256
+pinned setuptools wheel `setuptools-84.0.0-py3-none-any.whl` as its sole
+filesystem entry, reject that entry unless it is a non-symlink regular file,
+and verify SHA-256
 `51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670`.
 Only after those checks pass may it create a fresh disposable venv and run:
 
@@ -63,7 +64,10 @@ modifying the wheelhouse, or deleting unexpected files. `--find-links` alone
 does not make a wheelhouse trusted: trust is established by repository-local
 path validation, symlink rejection, exact candidate validation, the pinned
 filename, and SHA-256 verification. Pip retains build isolation and obtains
-build tooling only from that validated local wheelhouse.
+build tooling only from that validated local wheelhouse. Consistent with
+DEP-002, pip may install that explicitly approved tooling into its ephemeral
+isolated build environment; uncontrolled or package-index-resolved tooling
+installation remains prohibited.
 
 Validation then runs from a controlled directory outside the repository root
 and uses `importlib.metadata` to check the checkout import origin, distribution

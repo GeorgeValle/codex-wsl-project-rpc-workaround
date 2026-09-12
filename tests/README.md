@@ -29,8 +29,8 @@ infrastructure, not a package runtime dependency. Before pip may execute build
 tooling, validation must use `validate_setuptools_wheelhouse()` from
 `test_foundation.py`. It first applies the repository cache-boundary checks,
 then rejects a missing, non-directory, symbolic-link, or out-of-cache
-wheelhouse, requires the sole setuptools distribution candidate to be
-`setuptools-84.0.0-py3-none-any.whl`, and verifies its SHA-256 is
+wheelhouse, requires its sole filesystem entry to be the non-symlink regular
+wheel `setuptools-84.0.0-py3-none-any.whl`, and verifies its SHA-256 is
 `51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670`.
 The validator does not create or repair the externally provisioned wheelhouse.
 
@@ -38,7 +38,8 @@ The mandatory order is:
 
 1. validate the repository cache boundary;
 2. validate the wheelhouse boundary;
-3. validate the exact, unique setuptools wheel candidate;
+3. require exactly one filesystem entry and validate it as the approved
+   non-symlink regular setuptools wheel;
 4. validate its SHA-256;
 5. create a fresh disposable packaging venv; and
 6. only then invoke pip as follows, with build isolation enabled:
@@ -64,7 +65,9 @@ After installation, validation must run outside the repository root and check
 the import origin plus distribution name, version, `Requires-Python`, empty
 `Requires-Dist`, and absent `console_scripts` with `importlib.metadata`.
 The validation task performs no package-index resolution, runtime dependency
-resolution, or automatic tooling download.
+resolution, or uncontrolled tooling download. Pip build isolation may install
+the approved build tool into its ephemeral environment only from the validated,
+pinned, hash-verified local artifact.
 
 Tests are bounded and deterministic. They do not:
 

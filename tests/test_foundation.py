@@ -89,23 +89,24 @@ def validate_setuptools_wheelhouse(
             "Setuptools wheelhouse resolves outside the repository cache"
         )
 
-    regular_files = [
-        Path(entry.path)
-        for entry in os.scandir(resolved_wheelhouse)
-        if stat.S_ISREG(entry.stat(follow_symlinks=False).st_mode)
-    ]
-    candidates = sorted(
-        path.name
-        for path in regular_files
-        if path.name.lower().startswith(("setuptools-", "setuptools_", "setuptools."))
-    )
-    if candidates != [SETUPTOOLS_WHEEL]:
-        raise AssertionError(
-            "Expected exactly the approved setuptools wheel; found "
-            f"{candidates!r}"
-        )
+    entries = list(os.scandir(resolved_wheelhouse))
+    if len(entries) != 1:
+        raise AssertionError("Wheelhouse must contain exactly one approved artifact")
 
-    wheel = resolved_wheelhouse / SETUPTOOLS_WHEEL
+    entry = entries[0]
+    if entry.name != SETUPTOOLS_WHEEL:
+        raise AssertionError(
+            f"Wheelhouse artifact must be {SETUPTOOLS_WHEEL}; found {entry.name!r}"
+        )
+    if entry.is_symlink():
+        raise AssertionError("Approved wheelhouse artifact must not be a symbolic link")
+    if not stat.S_ISREG(entry.stat(follow_symlinks=False).st_mode):
+        raise AssertionError("Approved wheelhouse artifact must be a regular file")
+
+    wheel = Path(entry.path).resolve(strict=True)
+    if wheel.parent != resolved_wheelhouse:
+        raise AssertionError("Approved wheel resolves outside the validated wheelhouse")
+
     digest = hashlib.sha256()
     with wheel.open("rb") as artifact:
         for chunk in iter(lambda: artifact.read(1024 * 1024), b""):
@@ -301,7 +302,7 @@ class SetuptoolsWheelhouseTests(unittest.TestCase):
             wheelhouse.mkdir(parents=True)
             (wheelhouse / "setuptools-83.0.0-py3-none-any.whl").write_bytes(b"wheel")
 
-            with self.assertRaisesRegex(AssertionError, "exactly the approved"):
+            with self.assertRaisesRegex(AssertionError, "artifact must be"):
                 validate_setuptools_wheelhouse(
                     wheelhouse=wheelhouse, cache=cache, root=root
                 )
@@ -313,9 +314,76 @@ class SetuptoolsWheelhouseTests(unittest.TestCase):
             wheelhouse = cache / "codex-wsl-rpc-wheelhouse"
             wheelhouse.mkdir(parents=True)
             (wheelhouse / SETUPTOOLS_WHEEL).write_bytes(b"expected")
-            (wheelhouse / "setuptools-85.0.0.tar.gz").write_bytes(b"additional")
+            (wheelhouse / "setuptools-85.0.0-py3-none-any.whl").write_bytes(
+                b"additional"
+            )
 
-            with self.assertRaisesRegex(AssertionError, "exactly the approved"):
+            with self.assertRaisesRegex(AssertionError, "exactly one approved"):
+                validate_setuptools_wheelhouse(
+                    wheelhouse=wheelhouse, cache=cache, root=root
+                )
+
+    def test_additional_regular_file_is_rejected(self) -> None:
+        with self.wheelhouse_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            wheelhouse = cache / "codex-wsl-rpc-wheelhouse"
+            wheelhouse.mkdir(parents=True)
+            (wheelhouse / SETUPTOOLS_WHEEL).write_bytes(b"expected")
+            (wheelhouse / "unrelated.txt").write_text("unexpected", encoding="utf-8")
+
+            with self.assertRaisesRegex(AssertionError, "exactly one approved"):
+                validate_setuptools_wheelhouse(
+                    wheelhouse=wheelhouse, cache=cache, root=root
+                )
+
+    def test_additional_symbolic_link_candidate_is_rejected(self) -> None:
+        with self.wheelhouse_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            wheelhouse = cache / "codex-wsl-rpc-wheelhouse"
+            wheelhouse.mkdir(parents=True)
+            approved = wheelhouse / SETUPTOOLS_WHEEL
+            approved.write_bytes(b"expected")
+            candidate = wheelhouse / "setuptools-85.0.0-py3-none-any.whl"
+            try:
+                candidate.symlink_to(approved.name)
+            except OSError as error:
+                self.skipTest(f"symbolic-link creation is unavailable: {error}")
+
+            with self.assertRaisesRegex(AssertionError, "exactly one approved"):
+                validate_setuptools_wheelhouse(
+                    wheelhouse=wheelhouse, cache=cache, root=root
+                )
+
+    def test_expected_wheel_symbolic_link_is_rejected(self) -> None:
+        with self.wheelhouse_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            wheelhouse = cache / "codex-wsl-rpc-wheelhouse"
+            wheelhouse.mkdir(parents=True)
+            target = cache / "controlled-wheel-target"
+            target.write_bytes(b"controlled target")
+            wheel = wheelhouse / SETUPTOOLS_WHEEL
+            try:
+                wheel.symlink_to(target)
+            except OSError as error:
+                self.skipTest(f"symbolic-link creation is unavailable: {error}")
+
+            with self.assertRaisesRegex(AssertionError, "must not be a symbolic link"):
+                validate_setuptools_wheelhouse(
+                    wheelhouse=wheelhouse, cache=cache, root=root
+                )
+
+    def test_directory_entry_is_rejected(self) -> None:
+        with self.wheelhouse_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            wheelhouse = cache / "codex-wsl-rpc-wheelhouse"
+            wheelhouse.mkdir(parents=True)
+            (wheelhouse / SETUPTOOLS_WHEEL).mkdir()
+
+            with self.assertRaisesRegex(AssertionError, "must be a regular file"):
                 validate_setuptools_wheelhouse(
                     wheelhouse=wheelhouse, cache=cache, root=root
                 )

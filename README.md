@@ -127,5 +127,7 @@ not part of the package's runtime dependency model. Validation creates the
 exact ignored repository-local environment
 `.cache/codex-wsl-rpc-packaging-venv`, then uses pip build isolation with
 `--isolated`, `--no-index`, the local wheelhouse, `--no-cache-dir`, and
-`--no-deps`. The validation task does not download or install missing tooling
-from a package index. No functional Codex workaround exists yet.
+`--no-deps`. Build isolation may install the explicitly approved build tool
+into an ephemeral environment only from the pinned, provenance-controlled,
+hash-verified local artifact; it does not use a package index or add a runtime
+dependency. No functional Codex workaround exists yet.

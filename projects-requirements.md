@@ -31,7 +31,13 @@ possible WSL-first Project-management workaround.
 
 - **DEP-001:** Runtime dependencies MUST remain empty until a reviewed change
   demonstrates that the standard library is insufficient.
-- **DEP-002:** Tooling MUST NOT be installed automatically.
+- **DEP-002:** Repository runtime code, package imports, and canonical tests MUST
+  NOT automatically download or install tooling from uncontrolled or
+  network-resolved sources. Tooling MAY be provisioned by an explicitly
+  reviewed external development environment. Packaging validation MAY install
+  explicitly approved build tooling into an ephemeral isolated build
+  environment only from a pre-provisioned, pinned, provenance-controlled,
+  hash-verified local artifact with package-index access disabled.
 - **DEP-003:** New dependencies require necessity, provenance, and risk review.
 
 ## Protocol research provenance
