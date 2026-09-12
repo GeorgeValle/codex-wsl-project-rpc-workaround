@@ -42,20 +42,21 @@ class ValidationError(RuntimeError):
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
-def _stop_process_group(process: subprocess.Popen[str]) -> None:
+def _stop_process_group(
+    process: subprocess.Popen[str], process_group_id: int
+) -> None:
     """Stop and reap the Linux process group owned by *process*, boundedly."""
 
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        os.killpg(process_group_id, signal.SIGTERM)
     except ProcessLookupError:
         pass
     try:
         process.communicate(timeout=2)
-        return
     except subprocess.TimeoutExpired:
         pass
     try:
-        os.killpg(process.pid, signal.SIGKILL)
+        os.killpg(process_group_id, signal.SIGKILL)
     except ProcessLookupError:
         pass
     try:
@@ -77,13 +78,14 @@ def run_process(arguments: Sequence[str], *, cwd: Path, env: dict[str, str],
         list(arguments), cwd=cwd, env=env, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=text, shell=False, start_new_session=True,
     )
+    process_group_id = process.pid
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        _stop_process_group(process)
+        _stop_process_group(process, process_group_id)
         raise
     except BaseException:
-        _stop_process_group(process)
+        _stop_process_group(process, process_group_id)
         raise
     return subprocess.CompletedProcess(arguments, process.returncode, stdout, stderr)
 

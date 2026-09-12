@@ -464,6 +464,7 @@ class RealProcessRunnerTests(FixtureMixin, unittest.TestCase):
         process.communicate.side_effect = [
             subprocess.TimeoutExpired(["python"], 1),
             ("", ""),
+            ("", ""),
         ]
         with mock.patch.object(validate_packaging.subprocess, "Popen", return_value=process) as popen:
             with mock.patch.object(validate_packaging.os, "killpg") as killpg:
@@ -473,14 +474,22 @@ class RealProcessRunnerTests(FixtureMixin, unittest.TestCase):
                         text=True, check=False, shell=False, timeout=1,
                     )
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
-        killpg.assert_called_once_with(43210, validate_packaging.signal.SIGTERM)
+        self.assertEqual(killpg.call_args_list, [
+            mock.call(43210, validate_packaging.signal.SIGTERM),
+            mock.call(43210, validate_packaging.signal.SIGKILL),
+        ])
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux process groups required")
     def test_descendant_cannot_finish_planned_work_after_timeout(self):
         with self.sandbox() as temporary:
             area = Path(temporary)
             marker = area / "descendant-finished"
-            child = "import pathlib,time,sys; time.sleep(2); pathlib.Path(sys.argv[1]).write_text('bad')"
+            child = (
+                "import os,pathlib,signal,time,sys; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "os.close(1); os.close(2); time.sleep(2); "
+                "pathlib.Path(sys.argv[1]).write_text('bad')"
+            )
             parent = (
                 "import subprocess,sys,time; "
                 "subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]]); "
@@ -497,6 +506,74 @@ class RealProcessRunnerTests(FixtureMixin, unittest.TestCase):
 
 
 class ImportInertnessTests(FixtureMixin, unittest.TestCase):
+    def run_package_probe(self, package_source: str, area: Path):
+        package_root = area / "source"
+        package = package_root / "codex_wsl_rpc"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text(package_source, encoding="utf-8")
+        report = area / "report.json"
+        environment = {
+            "FOUNDATION_ALLOWED_READ_ROOTS": json.dumps([str(package_root)]),
+            "FOUNDATION_REPORT": str(report),
+            "FOUNDATION_SRC": str(package_root),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        result = subprocess.run(
+            [sys.executable, "-S", "-B", "-c", guarded_import_probe()],
+            cwd=area, env=environment, capture_output=True, text=True,
+            check=False, shell=False, timeout=IMPORT_PROBE_TIMEOUT_SECONDS,
+        )
+        return result, json.loads(report.read_text(encoding="utf-8"))
+
+    def test_guarded_package_probe_rejects_filesystem_mutation(self):
+        with self.sandbox() as temporary:
+            area = Path(temporary)
+            target = area / "owned.txt"
+            target.write_text("keep", encoding="utf-8")
+            result, observation = self.run_package_probe(
+                "from pathlib import Path\n"
+                "try:\n"
+                f"    Path({str(target)!r}).unlink()\n"
+                "except RuntimeError:\n"
+                "    pass\n",
+                area,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("os.remove", observation["denied_audit_events"])
+            self.assertTrue(target.exists())
+
+    def test_guarded_package_probe_rejects_dns_and_connectionless_network(self):
+        cases = {
+            "dns": (
+                "import socket\ntry:\n"
+                "    socket.getaddrinfo('localhost', 80)\n"
+                "except RuntimeError:\n    pass\n"
+            ),
+            "connectionless": (
+                "import socket\ntry:\n"
+                "    socket.socket().sendto(b'x', ('127.0.0.1', 9))\n"
+                "except RuntimeError:\n    pass\n"
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), self.sandbox() as temporary:
+                result, observation = self.run_package_probe(source, Path(temporary))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(
+                    observation["denied_audit_events"],
+                    (result.returncode, result.stdout, result.stderr, observation),
+                )
+                self.assertTrue(all(event.startswith("socket.")
+                                    for event in observation["denied_audit_events"]))
+
+    def test_guarded_package_probe_allows_inert_module(self):
+        with self.sandbox() as temporary:
+            result, observation = self.run_package_probe(
+                '__version__ = "0.0.0"\n', Path(temporary)
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(observation["denied_audit_events"], [])
+
     def test_guarded_package_probe_rejects_unrelated_file_read(self):
         with self.sandbox() as temporary:
             area = Path(temporary)

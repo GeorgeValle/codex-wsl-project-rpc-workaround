@@ -192,6 +192,7 @@ class InertImportTests(unittest.TestCase):
             observation = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(observation["origin"], str((PACKAGE / "__init__.py").resolve()))
             self.assertEqual(observation["invoked"], [])
+            self.assertEqual(observation["denied_audit_events"], [])
             self.assertTrue(observation["filesystem_io"])
             self.assertTrue(all(item["allowed"] and not item["write"]
                                 for item in observation["filesystem_io"]))

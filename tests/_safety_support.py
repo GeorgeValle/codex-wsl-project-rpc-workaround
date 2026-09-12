@@ -46,6 +46,7 @@ metadata_result = {
 
     return f"""
 import importlib.metadata
+import encodings.idna
 import json
 import os
 from pathlib import Path
@@ -76,10 +77,21 @@ allowed_read_roots = [
     for value in json.loads(os.environ["FOUNDATION_ALLOWED_READ_ROOTS"])
 ]
 filesystem_io = []
+denied_audit_events = []
 observing_import = True
 
-def observe_open(event, arguments):
-    if event != "open" or not observing_import:
+FILESYSTEM_MUTATION_EVENTS = frozenset({{
+    "os.remove", "os.rename", "os.rmdir", "os.mkdir", "os.link",
+    "os.symlink", "os.truncate", "os.chmod", "os.chown",
+}})
+
+def observe_import_activity(event, arguments):
+    if not observing_import:
+        return
+    if event in FILESYSTEM_MUTATION_EVENTS or event.startswith("socket."):
+        denied_audit_events.append(event)
+        raise RuntimeError(f"prohibited audit event: {{event}}")
+    if event != "open":
         return
     raw_path, mode, flags = arguments
     if isinstance(raw_path, int):
@@ -102,7 +114,7 @@ def observe_open(event, arguments):
     if writing or not allowed:
         raise RuntimeError(f"prohibited filesystem open: {{path}}")
 
-sys.addaudithook(observe_open)
+sys.addaudithook(observe_import_activity)
 import codex_wsl_rpc
 observing_import = False
 metadata_result = None
@@ -112,10 +124,13 @@ Path(os.environ["FOUNDATION_REPORT"]).write_text(
         "origin": str(Path(codex_wsl_rpc.__file__).resolve()),
         "invoked": invoked,
         "filesystem_io": filesystem_io,
+        "denied_audit_events": denied_audit_events,
         "metadata": metadata_result,
     }}),
     encoding="utf-8",
 )
 if any(item["write"] or not item["allowed"] for item in filesystem_io):
     raise RuntimeError("prohibited filesystem I/O observed during package import")
+if denied_audit_events:
+    raise RuntimeError("prohibited audit event observed during package import")
 """
