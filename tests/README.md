@@ -1,108 +1,33 @@
 # Test policy
 
-Run the canonical normal test suite from the repository root:
+The normal, deterministic unit suite is:
 
 ```console
 python3 -m unittest discover -s tests -v
 ```
 
-Normal tests require no package installation. They parse `pyproject.toml`,
-check the `src` package structure and version, reject configured CLI entry
-points, and import the package in a fresh child Python process. The import probe
-uses the current interpreter, an explicit absolute `src` path, bytecode
-suppression, repository-local temporary work and HOME-like directories, a
-small environment allowlist, captured output, artifact inspection, and guards
-for selected network, process, shell, and SQLite primitives.
+It requires neither package installation nor the externally provisioned build
+wheel. It validates source metadata and structure, statically reads the version,
+and runs the package only in a guarded, bounded child process.
 
-This evidence demonstrates the tested metadata and that the current import did
-not invoke those selected primitives or leave artifacts in the controlled
-directories. It does not prove the absence of every conceivable side effect,
-and it is not a Codex integration test. Static source review complements the
-targeted runtime guards rather than globally patching filesystem operations.
-
-Editable installation is a separate packaging-validation step, not a
-prerequisite for normal tests. It uses the exact ignored repository-local venv
-`.cache/codex-wsl-rpc-packaging-venv`. Codex Cloud setup first pre-provisions a
-pinned `setuptools 84.0.0` wheel under the ignored repository-local
-`.cache/codex-wsl-rpc-wheelhouse/`. That pre-task provisioning is validation
-infrastructure, not a package runtime dependency. Before pip may execute build
-tooling, validation must use `validate_setuptools_wheelhouse()` from
-`_safety_support.py`. It first applies the repository cache-boundary checks,
-then rejects a missing, non-directory, symbolic-link, or out-of-cache
-wheelhouse, requires its sole filesystem entry to be the non-symlink regular
-wheel `setuptools-84.0.0-py3-none-any.whl`, and verifies its SHA-256 is
-`51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670`.
-The validator does not create or repair the externally provisioned wheelhouse.
-
-The mandatory order is:
-
-1. validate the repository cache boundary;
-2. validate the wheelhouse boundary;
-3. require exactly one filesystem entry and validate it as the approved
-   non-symlink regular setuptools wheel;
-4. validate its SHA-256;
-5. validate and create the exact non-symlink repository-local temporary
-   directory `.cache/codex-wsl-rpc-packaging-tmp` with
-   `repository_disposable_dir()`;
-6. export `TMPDIR`, `TEMP`, and `TMP` to that validated absolute path;
-7. call `prepare_disposable_directory()` for the exact packaging-venv path,
-   opting into removal if it already exists; this rejects symlinks,
-   non-directories, and out-of-cache paths, removes only the exact validated
-   directory, and confirms the path is absent;
-8. create a fresh disposable packaging venv with those variables set;
-9. require the exact `src/codex_wsl_rpc.egg-info` path to be absent and reject
-   a symlink or any pre-existing entry before pip runs;
-10. invoke pip with those variables set and build isolation enabled;
-11. require the generated egg-info to be a non-symlink real directory whose
-    resolved parent is the repository `src`, then validate installed metadata; and
-12. remove only that validated egg-info directory, the disposable venv, and
-    packaging temporary directory.
-
-The venv is never created over an existing directory or reused. After its
-exact path has been boundary-validated and confirmed absent, creation is run
-as `TMPDIR="$PACKAGING_TMP" TEMP="$PACKAGING_TMP"
-TMP="$PACKAGING_TMP" python3 -m venv
-.cache/codex-wsl-rpc-packaging-venv`, where `PACKAGING_TMP` is the validated
-absolute path. The editable install is:
+The separate, opt-in packaging acceptance check is:
 
 ```console
-TMPDIR="$PACKAGING_TMP" \
-TEMP="$PACKAGING_TMP" \
-TMP="$PACKAGING_TMP" \
-.cache/codex-wsl-rpc-packaging-venv/bin/python \
-  -m pip \
-  --isolated \
-  --disable-pip-version-check \
-  install \
-  --no-index \
-  --find-links .cache/codex-wsl-rpc-wheelhouse \
-  --no-cache-dir \
-  --no-deps \
-  --editable .
+python3 -B tests/validate_packaging.py
 ```
 
-Pip must not be invoked if any wheelhouse validation fails. `--find-links`
-does not itself establish trust; trust comes from the boundary, symlink,
-candidate, pinned-filename, and digest checks above.
+[`validate_packaging.py`](validate_packaging.py) is the executable and
+authoritative procedure. It validates the repository-local `.cache` boundary
+and the externally provisioned pinned setuptools wheel, creates one unique
+workspace beneath `.cache`, copies the current packaging inputs into it, and
+performs a build-isolated editable install of that copy. Pip uses only a private
+copy of the approved wheel with package-index access disabled. Installation
+metadata and package origin are checked from the workspace's `run` directory.
 
-After installation, validation must run outside the repository root and check
-the import origin plus distribution name, version, `Requires-Python`, empty
-`Requires-Dist`, and absent `console_scripts` with `importlib.metadata`.
-`TMPDIR`, `TEMP`, and `TMP` remain set to `PACKAGING_TMP` for that validation.
-The validation task performs no package-index resolution, runtime dependency
-resolution, or uncontrolled tooling download. Pip build isolation may install
-the approved build tool into its ephemeral environment only from the validated,
-pinned, hash-verified local artifact.
-Cleanup revalidates the exact non-symlink repository-local paths and removes
-only `.cache/codex-wsl-rpc-packaging-venv` and
-`.cache/codex-wsl-rpc-packaging-tmp`; it retains `.cache` and the wheelhouse.
+The packaging check removes only its owned workspace after complete success.
+On failure it reports and retains that workspace for inspection. It never
+reuses or cleans an old fixed packaging venv, and it never creates or removes
+editable-build metadata in the original source tree.
 
-Tests are bounded and deterministic. They do not:
-
-- require a real Codex installation (real integration must be explicit opt-in);
-- access `~/.codex`;
-- require credentials or secrets; or
-- require network access, Windows, WSL, or real user state.
-
-No protocol, transport, mock RPC, or functional Codex capability is tested or
-provided at this `NON_FUNCTIONAL` stage.
+Both commands are development validation. They provide no Codex integration,
+transport, RPC, network, state, or mutation capability.

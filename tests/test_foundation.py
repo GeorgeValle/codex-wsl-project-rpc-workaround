@@ -12,12 +12,13 @@ import tempfile
 import tomllib
 import unittest
 
-from _safety_support import CACHE, repository_cache_dir
+from _safety_support import guarded_import_probe, repository_cache_dir
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = ROOT / "pyproject.toml"
-SRC = (ROOT / "src").resolve()
+SRC = ROOT / "src"
+CACHE = ROOT / ".cache"
 PACKAGE = SRC / "codex_wsl_rpc"
 IMPORT_PROBE_TIMEOUT_SECONDS = 10
 
@@ -86,7 +87,7 @@ class PackageStructureTests(unittest.TestCase):
 
 class RepositoryCacheTests(unittest.TestCase):
     def test_repository_local_cache_directory_is_accepted(self) -> None:
-        cache = repository_cache_dir()
+        cache = repository_cache_dir(CACHE, ROOT)
         with tempfile.TemporaryDirectory(prefix="cache-boundary-", dir=cache) as temporary:
             test_root = Path(temporary)
             test_cache = test_root / ".cache"
@@ -97,7 +98,7 @@ class RepositoryCacheTests(unittest.TestCase):
             )
 
     def test_existing_non_directory_cache_path_is_rejected(self) -> None:
-        cache = repository_cache_dir()
+        cache = repository_cache_dir(CACHE, ROOT)
         with tempfile.TemporaryDirectory(prefix="cache-boundary-", dir=cache) as temporary:
             test_root = Path(temporary)
             test_cache = test_root / ".cache"
@@ -107,7 +108,7 @@ class RepositoryCacheTests(unittest.TestCase):
                 repository_cache_dir(cache=test_cache, root=test_root)
 
     def test_out_of_root_cache_is_rejected_before_creation(self) -> None:
-        cache = repository_cache_dir()
+        cache = repository_cache_dir(CACHE, ROOT)
         with tempfile.TemporaryDirectory(prefix="cache-boundary-", dir=cache) as temporary:
             test_sandbox = Path(temporary)
             allowed_root = test_sandbox / "allowed-root"
@@ -122,7 +123,7 @@ class RepositoryCacheTests(unittest.TestCase):
             self.assertFalse(unauthorized_cache.exists())
 
     def test_symbolic_link_cache_path_is_rejected(self) -> None:
-        cache = repository_cache_dir()
+        cache = repository_cache_dir(CACHE, ROOT)
         with tempfile.TemporaryDirectory(prefix="cache-boundary-", dir=cache) as temporary:
             test_root = Path(temporary)
             target = test_root / "target"
@@ -139,7 +140,7 @@ class RepositoryCacheTests(unittest.TestCase):
 
 class InertImportTests(unittest.TestCase):
     def test_import_is_inert_under_targeted_observation_guards(self) -> None:
-        cache = repository_cache_dir()
+        cache = repository_cache_dir(CACHE, ROOT)
         with tempfile.TemporaryDirectory(prefix="foundation-import-", dir=cache) as temporary:
             sandbox = Path(temporary)
             work = sandbox / "work"
@@ -150,37 +151,7 @@ class InertImportTests(unittest.TestCase):
             for directory in (work, home, state, temp_root):
                 directory.mkdir()
 
-            probe = """
-import json
-import os
-from pathlib import Path
-import socket
-import sqlite3
-import subprocess
-import sys
-
-invoked = []
-def prohibited(name):
-    def guard(*args, **kwargs):
-        invoked.append(name)
-        raise RuntimeError(f"prohibited primitive invoked: {name}")
-    return guard
-
-socket.create_connection = prohibited("socket.create_connection")
-socket.socket.connect = prohibited("socket.socket.connect")
-subprocess.Popen = prohibited("subprocess.Popen")
-os.system = prohibited("os.system")
-sqlite3.connect = prohibited("sqlite3.connect")
-
-sys.path.insert(0, os.environ["FOUNDATION_SRC"])
-
-import codex_wsl_rpc
-
-Path(os.environ["FOUNDATION_REPORT"]).write_text(
-    json.dumps({"origin": str(Path(codex_wsl_rpc.__file__).resolve()), "invoked": invoked}),
-    encoding="utf-8",
-)
-"""
+            probe = guarded_import_probe()
             environment = {
                 "APPDATA": str(state / "appdata"),
                 "FOUNDATION_REPORT": str(report),

@@ -1,118 +1,91 @@
 # Subdivision 1.2 — Python packaging and test execution baseline
 
-## Objective and coverage
+## Objective and durable status
 
-Establish deterministic, auditable, repository-local validation of the Python
-package without adding Codex behavior. Standard-library tests cover source
-metadata, package discovery and structure, version consistency, absent CLI
-entry points, and a controlled inert-import observation. This supplies the
-packaging and test-execution prerequisite portion of GATE-001 without advancing
-through that gate.
-
-## Capability and package decisions
-
+- **Status:** `IMPLEMENTED`
 - **Capability level:** `NON_FUNCTIONAL`
 - **Mutation authorization:** `NONE`
-- **Package:** Python >=3.11, setuptools PEP 517, `src` layout
-- **Names/version:** distribution `codex-wsl-rpc`, import `codex_wsl_rpc`,
-  version `0.0.0`
-- **Dependencies/CLI:** no runtime dependencies, test framework dependency,
-  optional convenience group, or CLI
+- **Package version:** `0.0.0`
+- **Runtime dependencies:** `[]`
 
-The canonical normal test command is:
+This Subdivision establishes deterministic source tests and an explicit,
+repeatable packaging acceptance check. It adds no Codex behavior and does not
+advance the capability level.
+
+## Validation commands
+
+Normal unit tests require no installation or provisioned wheel:
 
 ```console
 python3 -m unittest discover -s tests -v
 ```
 
-It requires no installation, Codex, network, credentials, secrets, Windows,
-WSL, or real user state.
-
-## Packaging validation strategy
-
-Packaging validation is separate from normal tests. Before the validation task
-starts, Codex Cloud setup pre-provisions the pinned `setuptools 84.0.0` wheel
-under `.cache/codex-wsl-rpc-wheelhouse/`. This environment provisioning is not
-part of the package runtime dependency model. The task validates that the
-wheelhouse is repository-local and then creates the exact ignored,
-repository-local environment `.cache/codex-wsl-rpc-packaging-venv`.
-
-Wheelhouse validation is a mandatory precondition to executing pip. In order,
-the task must validate the repository cache boundary, reject a missing,
-non-directory, symbolic-link, or out-of-cache wheelhouse, require exactly the
-pinned setuptools wheel `setuptools-84.0.0-py3-none-any.whl` as its sole
-filesystem entry, reject that entry unless it is a non-symlink regular file,
-and verify SHA-256
-`51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670`.
-Only after those checks pass may validation use
-`repository_disposable_dir()` to boundary-check and create the exact
-non-symlink directory `.cache/codex-wsl-rpc-packaging-tmp`. It exports
-`TMPDIR`, `TEMP`, and `TMP` to that validated absolute path before creating the
-fresh disposable venv, invoking pip, or validating installed metadata. Before
-venv creation, `prepare_disposable_directory()` validates the exact venv path.
-A stale directory is removed only with explicit opt-in after symlink, type,
-and exact cache-parent validation; symlinked, non-directory, and out-of-cache
-paths fail closed. Creation occurs only after the path is confirmed absent.
-The editable install is:
+Packaging validation is separately opted into:
 
 ```console
-TMPDIR="$PACKAGING_TMP" \
-TEMP="$PACKAGING_TMP" \
-TMP="$PACKAGING_TMP" \
-.cache/codex-wsl-rpc-packaging-venv/bin/python \
-  -m pip \
-  --isolated \
-  --disable-pip-version-check \
-  install \
-  --no-index \
-  --find-links .cache/codex-wsl-rpc-wheelhouse \
-  --no-cache-dir \
-  --no-deps \
-  --editable .
+python3 -B tests/validate_packaging.py
 ```
 
-The validation fails closed without invoking pip, downloading a replacement,
-modifying the wheelhouse, or deleting unexpected files. `--find-links` alone
-does not make a wheelhouse trusted: trust is established by repository-local
-path validation, symlink rejection, exact candidate validation, the pinned
-filename, and SHA-256 verification. Pip retains build isolation and obtains
-build tooling only from that validated local wheelhouse. Consistent with
-DEP-002, pip may install that explicitly approved tooling into its ephemeral
-isolated build environment; uncontrolled or package-index-resolved tooling
-installation remains prohibited.
+The executable [packaging validator](../../../tests/validate_packaging.py) is
+the canonical procedure; detailed shell instructions are intentionally not
+duplicated here.
 
-Validation then runs from a controlled directory outside the repository root
-and uses `importlib.metadata` to check the checkout import origin, distribution
-name/version, `Requires-Python`, empty `Requires-Dist`, and absent
-`console_scripts`, while the same temporary-directory variables remain set.
-The required order is cache validation, wheelhouse validation, exact wheel and
-digest validation, packaging-temp validation/creation, temporary-variable
-export, exact stale-venv validation and removal, confirmation that the venv
-path is absent, clean venv creation, rejection of stale or pre-existing editable
-metadata, editable install, validation of the generated repository-local
-`src/codex_wsl_rpc.egg-info` directory, metadata validation, and exact cleanup. The validation performs no package-index or runtime
-dependency resolution and no automatic tooling download. Only the exact validated generated egg-info directory, disposable venv, and
-packaging-temp directory may be removed afterward. The cache directory,
-provisioned wheelhouse, and unrelated source files remain.
+## Packaging model
 
-## Acceptance evidence and limitations
+The original checkout is read-only packaging input. The validator checks the
+lexical `src` path before resolving it, rejects authored symlinks and
+non-regular entries, and copies `pyproject.toml`, `README.md`, `LICENSE`, and
+the authored `src` tree byte-for-byte into one new
+`.cache/packaging-check-<unique>/project` directory. Generated `.egg-info` and
+`__pycache__` entries are neither followed nor copied. The editable install
+targets only the copied project, and its expected import origin is the copied
+source tree.
 
-The source tests and controlled child-process import provide bounded evidence,
-not proof against every possible side effect. Static source audit is required
-as complementary evidence. In the recorded validation environment, the fresh
-Python 3.12 venv did not need setuptools preinstalled: pip build isolation
-successfully obtained `setuptools 84.0.0` from the provisioned local wheelhouse
-with `--no-index`, and the editable install and installed metadata checks
-passed. Environment provisioning occurred before the task; packaging
-validation itself used the local wheelhouse only.
+The externally provisioned wheelhouse must be a real repository-local directory
+containing exactly `setuptools-84.0.0-py3-none-any.whl`, with SHA-256
+`51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670`.
+The verified wheel is copied into the unique workspace and verified again. Pip
+uses only that private candidate set with build isolation, `--no-index`, and no
+runtime dependency resolution.
 
-## Deferrals and durable status
+All packaging children share one allowlisted environment. Temporary, home,
+application-data, and cache paths point inside the workspace; Python import-path
+overrides are not inherited; pip configuration files are disabled. Commands use
+argument lists, `shell=False`, checked results, and finite execution timeouts.
+The installed probe runs with `-I -B` from the workspace `run` directory and
+checks distribution name/version, Python requirement, empty requirements,
+absent console and GUI entry points, guarded import behavior, and copied-source
+origin. The normal SOURCE import probe remains a distinct `-S` guarded check.
 
-- **Status:** `IMPLEMENTED`
-- **Block 2 deferrals:** protocol research, schemas, JSON-RPC, fake or real
-  transport, app-server/executable lifecycle, and every Project RPC
-- **Other deferrals:** Codex/Windows/WSL integration, Codex state access,
-  networking, mutation, release automation, and CI
-- **Historical delivery evidence:** the implementation Pull Request for this
-  Subdivision; any PR number is non-normative and GitHub remains authoritative
-  for delivery state
+Only a fully successful run removes its unique workspace. Failures retain and
+report that workspace. The shared wheelhouse, pre-existing workspaces, original
+generated metadata, and original checkout are never cleaned or reused.
+
+## Execution assumptions and limitations
+
+The interpreter, standard library, preinstalled pip, and reviewed project source
+are trusted development inputs. Unexpected paths, symlinks, stale artifacts,
+and wrong wheels are rejected rather than followed, executed, overwritten, or
+deleted. Existing prohibitions on Codex state, credentials, network behavior,
+and mutation remain in force.
+
+This validation is not an operating-system sandbox for arbitrary malicious
+Python. It does not claim resistance to a compromised interpreter or kernel, or
+to a hostile same-user process concurrently replacing validated files. These
+limits do not excuse reproducible defects: review findings should identify a
+concrete failure path under this execution model and distinguish current bugs
+from speculative hardening.
+
+## Acceptance evidence
+
+The consolidated validator was run twice from the delivered working tree. Both
+runs allocated distinct fresh workspaces, completed the copied-source editable
+installation and installed metadata/origin checks, and removed only their owned
+workspaces. The unit suite, compile check, and diff check also passed. No real
+Codex RPC, state access, network resolution, or mutation was performed.
+
+## Deferrals
+
+Protocol research, schemas, transports, process lifecycle, Codex/Windows/WSL
+integration, user-state access, networking, mutation, release automation, and
+CI remain out of scope and require later reviewed work.
