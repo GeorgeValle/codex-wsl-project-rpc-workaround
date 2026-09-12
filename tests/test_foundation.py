@@ -193,6 +193,7 @@ from pathlib import Path
 import socket
 import sqlite3
 import subprocess
+import sys
 
 invoked = []
 def prohibited(name):
@@ -207,6 +208,8 @@ subprocess.Popen = prohibited("subprocess.Popen")
 os.system = prohibited("os.system")
 sqlite3.connect = prohibited("sqlite3.connect")
 
+sys.path.insert(0, os.environ["FOUNDATION_SRC"])
+
 import codex_wsl_rpc
 
 Path(os.environ["FOUNDATION_REPORT"]).write_text(
@@ -217,10 +220,10 @@ Path(os.environ["FOUNDATION_REPORT"]).write_text(
             environment = {
                 "APPDATA": str(state / "appdata"),
                 "FOUNDATION_REPORT": str(report),
+                "FOUNDATION_SRC": str(SRC),
                 "HOME": str(home),
                 "LOCALAPPDATA": str(state / "localappdata"),
                 "PYTHONDONTWRITEBYTECODE": "1",
-                "PYTHONPATH": str(SRC),
                 "TEMP": str(temp_root),
                 "TMP": str(temp_root),
                 "TMPDIR": str(temp_root),
@@ -231,7 +234,7 @@ Path(os.environ["FOUNDATION_REPORT"]).write_text(
                     environment[name] = os.environ[name]
 
             result = subprocess.run(
-                [sys.executable, "-c", probe],
+                [sys.executable, "-S", "-c", probe],
                 cwd=work,
                 env=environment,
                 capture_output=True,
