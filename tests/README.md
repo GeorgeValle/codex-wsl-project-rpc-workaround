@@ -25,12 +25,40 @@ prerequisite for normal tests. It uses the exact ignored repository-local venv
 `.cache/codex-wsl-rpc-packaging-venv`. Codex Cloud setup first pre-provisions a
 pinned `setuptools 84.0.0` wheel under the ignored repository-local
 `.cache/codex-wsl-rpc-wheelhouse/`. That pre-task provisioning is validation
-infrastructure, not a package runtime dependency. The editable install keeps
-pip build isolation enabled and uses only the local wheelhouse:
+infrastructure, not a package runtime dependency. Before pip may execute build
+tooling, validation must use `validate_setuptools_wheelhouse()` from
+`test_foundation.py`. It first applies the repository cache-boundary checks,
+then rejects a missing, non-directory, symbolic-link, or out-of-cache
+wheelhouse, requires the sole setuptools distribution candidate to be
+`setuptools-84.0.0-py3-none-any.whl`, and verifies its SHA-256 is
+`51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670`.
+The validator does not create or repair the externally provisioned wheelhouse.
+
+The mandatory order is:
+
+1. validate the repository cache boundary;
+2. validate the wheelhouse boundary;
+3. validate the exact, unique setuptools wheel candidate;
+4. validate its SHA-256;
+5. create a fresh disposable packaging venv; and
+6. only then invoke pip as follows, with build isolation enabled:
 
 ```console
-.cache/codex-wsl-rpc-packaging-venv/bin/python -m pip --isolated --disable-pip-version-check install --no-index --find-links .cache/codex-wsl-rpc-wheelhouse --no-cache-dir --no-deps --editable .
+.cache/codex-wsl-rpc-packaging-venv/bin/python \
+  -m pip \
+  --isolated \
+  --disable-pip-version-check \
+  install \
+  --no-index \
+  --find-links .cache/codex-wsl-rpc-wheelhouse \
+  --no-cache-dir \
+  --no-deps \
+  --editable .
 ```
+
+Pip must not be invoked if any wheelhouse validation fails. `--find-links`
+does not itself establish trust; trust comes from the boundary, symlink,
+candidate, pinned-filename, and digest checks above.
 
 After installation, validation must run outside the repository root and check
 the import origin plus distribution name, version, `Requires-Python`, empty

@@ -35,12 +35,35 @@ starts, Codex Cloud setup pre-provisions the pinned `setuptools 84.0.0` wheel
 under `.cache/codex-wsl-rpc-wheelhouse/`. This environment provisioning is not
 part of the package runtime dependency model. The task validates that the
 wheelhouse is repository-local and then creates the exact ignored,
-repository-local environment `.cache/codex-wsl-rpc-packaging-venv`. Its pip
-uses build isolation and obtains build tooling only from the local wheelhouse:
+repository-local environment `.cache/codex-wsl-rpc-packaging-venv`.
+
+Wheelhouse validation is a mandatory precondition to executing pip. In order,
+the task must validate the repository cache boundary, reject a missing,
+non-directory, symbolic-link, or out-of-cache wheelhouse, require exactly the
+pinned setuptools candidate `setuptools-84.0.0-py3-none-any.whl`, and verify
+SHA-256
+`51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670`.
+Only after those checks pass may it create a fresh disposable venv and run:
 
 ```console
-.cache/codex-wsl-rpc-packaging-venv/bin/python -m pip --isolated --disable-pip-version-check install --no-index --find-links .cache/codex-wsl-rpc-wheelhouse --no-cache-dir --no-deps --editable .
+.cache/codex-wsl-rpc-packaging-venv/bin/python \
+  -m pip \
+  --isolated \
+  --disable-pip-version-check \
+  install \
+  --no-index \
+  --find-links .cache/codex-wsl-rpc-wheelhouse \
+  --no-cache-dir \
+  --no-deps \
+  --editable .
 ```
+
+The validation fails closed without invoking pip, downloading a replacement,
+modifying the wheelhouse, or deleting unexpected files. `--find-links` alone
+does not make a wheelhouse trusted: trust is established by repository-local
+path validation, symlink rejection, exact candidate validation, the pinned
+filename, and SHA-256 verification. Pip retains build isolation and obtains
+build tooling only from that validated local wheelhouse.
 
 Validation then runs from a controlled directory outside the repository root
 and uses `importlib.metadata` to check the checkout import origin, distribution

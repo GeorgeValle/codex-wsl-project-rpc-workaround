@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -18,6 +20,12 @@ PYPROJECT = ROOT / "pyproject.toml"
 SRC = (ROOT / "src").resolve()
 PACKAGE = SRC / "codex_wsl_rpc"
 CACHE = ROOT / ".cache"
+WHEELHOUSE = CACHE / "codex-wsl-rpc-wheelhouse"
+SETUPTOOLS_VERSION = "84.0.0"
+SETUPTOOLS_WHEEL = "setuptools-84.0.0-py3-none-any.whl"
+SETUPTOOLS_SHA256 = (
+    "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"
+)
 IMPORT_PROBE_TIMEOUT_SECONDS = 10
 
 
@@ -57,6 +65,59 @@ def repository_cache_dir(cache: Path = CACHE, root: Path = ROOT) -> Path:
         )
 
     return resolved_cache
+
+
+def validate_setuptools_wheelhouse(
+    wheelhouse: Path = WHEELHOUSE,
+    cache: Path = CACHE,
+    root: Path = ROOT,
+    expected_sha256: str = SETUPTOOLS_SHA256,
+) -> Path:
+    """Validate and return the sole approved local setuptools wheel."""
+
+    resolved_cache = repository_cache_dir(cache=cache, root=root)
+    if wheelhouse.is_symlink():
+        raise AssertionError("Setuptools wheelhouse must not be a symbolic link")
+    if not wheelhouse.exists():
+        raise AssertionError("Setuptools wheelhouse does not exist")
+    if not wheelhouse.is_dir():
+        raise AssertionError("Setuptools wheelhouse is not a directory")
+
+    resolved_wheelhouse = wheelhouse.resolve(strict=True)
+    if resolved_wheelhouse.parent != resolved_cache:
+        raise AssertionError(
+            "Setuptools wheelhouse resolves outside the repository cache"
+        )
+
+    regular_files = [
+        Path(entry.path)
+        for entry in os.scandir(resolved_wheelhouse)
+        if stat.S_ISREG(entry.stat(follow_symlinks=False).st_mode)
+    ]
+    candidates = sorted(
+        path.name
+        for path in regular_files
+        if path.name.lower().startswith(("setuptools-", "setuptools_", "setuptools."))
+    )
+    if candidates != [SETUPTOOLS_WHEEL]:
+        raise AssertionError(
+            "Expected exactly the approved setuptools wheel; found "
+            f"{candidates!r}"
+        )
+
+    wheel = resolved_wheelhouse / SETUPTOOLS_WHEEL
+    digest = hashlib.sha256()
+    with wheel.open("rb") as artifact:
+        for chunk in iter(lambda: artifact.read(1024 * 1024), b""):
+            digest.update(chunk)
+    actual_sha256 = digest.hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise AssertionError(
+            f"Setuptools wheel SHA-256 mismatch: expected {expected_sha256}, "
+            f"found {actual_sha256}"
+        )
+
+    return wheel
 
 
 def load_pyproject() -> dict[str, object]:
@@ -172,6 +233,105 @@ class RepositoryCacheTests(unittest.TestCase):
 
             with self.assertRaisesRegex(AssertionError, "must not be a symbolic link"):
                 repository_cache_dir(cache=test_cache, root=test_root)
+
+
+class SetuptoolsWheelhouseTests(unittest.TestCase):
+    def wheelhouse_sandbox(self) -> tempfile.TemporaryDirectory[str]:
+        return tempfile.TemporaryDirectory(
+            prefix="wheelhouse-boundary-", dir=repository_cache_dir()
+        )
+
+    def test_valid_local_wheelhouse_is_accepted(self) -> None:
+        with self.wheelhouse_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            cache.mkdir()
+            wheelhouse = cache / "codex-wsl-rpc-wheelhouse"
+            wheelhouse.mkdir()
+            contents = b"controlled test wheel contents"
+            wheel = wheelhouse / SETUPTOOLS_WHEEL
+            wheel.write_bytes(contents)
+
+            self.assertEqual(
+                validate_setuptools_wheelhouse(
+                    wheelhouse=wheelhouse,
+                    cache=cache,
+                    root=root,
+                    expected_sha256=hashlib.sha256(contents).hexdigest(),
+                ),
+                wheel.resolve(strict=True),
+            )
+
+    def test_symbolic_link_wheelhouse_is_rejected(self) -> None:
+        with self.wheelhouse_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            cache.mkdir()
+            target = cache / "controlled-target"
+            target.mkdir()
+            wheelhouse = cache / "codex-wsl-rpc-wheelhouse"
+            try:
+                wheelhouse.symlink_to(target, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"symbolic-link creation is unavailable: {error}")
+
+            with self.assertRaisesRegex(AssertionError, "must not be a symbolic link"):
+                validate_setuptools_wheelhouse(
+                    wheelhouse=wheelhouse, cache=cache, root=root
+                )
+
+    def test_missing_wheelhouse_is_rejected(self) -> None:
+        with self.wheelhouse_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            cache.mkdir()
+            wheelhouse = cache / "codex-wsl-rpc-wheelhouse"
+
+            with self.assertRaisesRegex(AssertionError, "does not exist"):
+                validate_setuptools_wheelhouse(
+                    wheelhouse=wheelhouse, cache=cache, root=root
+                )
+            self.assertFalse(wheelhouse.exists())
+
+    def test_wrong_setuptools_wheel_filename_is_rejected(self) -> None:
+        with self.wheelhouse_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            wheelhouse = cache / "codex-wsl-rpc-wheelhouse"
+            wheelhouse.mkdir(parents=True)
+            (wheelhouse / "setuptools-83.0.0-py3-none-any.whl").write_bytes(b"wheel")
+
+            with self.assertRaisesRegex(AssertionError, "exactly the approved"):
+                validate_setuptools_wheelhouse(
+                    wheelhouse=wheelhouse, cache=cache, root=root
+                )
+
+    def test_multiple_setuptools_candidates_are_rejected(self) -> None:
+        with self.wheelhouse_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            wheelhouse = cache / "codex-wsl-rpc-wheelhouse"
+            wheelhouse.mkdir(parents=True)
+            (wheelhouse / SETUPTOOLS_WHEEL).write_bytes(b"expected")
+            (wheelhouse / "setuptools-85.0.0.tar.gz").write_bytes(b"additional")
+
+            with self.assertRaisesRegex(AssertionError, "exactly the approved"):
+                validate_setuptools_wheelhouse(
+                    wheelhouse=wheelhouse, cache=cache, root=root
+                )
+
+    def test_incorrect_sha256_is_rejected(self) -> None:
+        with self.wheelhouse_sandbox() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache"
+            wheelhouse = cache / "codex-wsl-rpc-wheelhouse"
+            wheelhouse.mkdir(parents=True)
+            (wheelhouse / SETUPTOOLS_WHEEL).write_bytes(b"not the approved wheel")
+
+            with self.assertRaisesRegex(AssertionError, "SHA-256 mismatch"):
+                validate_setuptools_wheelhouse(
+                    wheelhouse=wheelhouse, cache=cache, root=root
+                )
 
 
 class InertImportTests(unittest.TestCase):
