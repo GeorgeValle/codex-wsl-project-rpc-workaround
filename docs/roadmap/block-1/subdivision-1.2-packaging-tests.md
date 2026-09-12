@@ -88,12 +88,12 @@ name/version, `Requires-Python`, empty `Requires-Dist`, and absent
 The required order is cache validation, wheelhouse validation, exact wheel and
 digest validation, packaging-temp validation/creation, temporary-variable
 export, exact stale-venv validation and removal, confirmation that the venv
-path is absent, clean venv creation, editable install, metadata validation,
-and exact cleanup. The validation performs no package-index or runtime
-dependency resolution and no automatic tooling download. Only the exact
-disposable venv and packaging-temp directory may be removed afterward, after
-each exact path is revalidated as repository-local and non-symlinked. The
-cache directory and provisioned wheelhouse remain.
+path is absent, clean venv creation, rejection of stale or pre-existing editable
+metadata, editable install, validation of the generated repository-local
+`src/codex_wsl_rpc.egg-info` directory, metadata validation, and exact cleanup. The validation performs no package-index or runtime
+dependency resolution and no automatic tooling download. Only the exact validated generated egg-info directory, disposable venv, and
+packaging-temp directory may be removed afterward. The cache directory,
+provisioned wheelhouse, and unrelated source files remain.
 
 ## Acceptance evidence and limitations
 

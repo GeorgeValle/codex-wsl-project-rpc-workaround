@@ -27,7 +27,7 @@ pinned `setuptools 84.0.0` wheel under the ignored repository-local
 `.cache/codex-wsl-rpc-wheelhouse/`. That pre-task provisioning is validation
 infrastructure, not a package runtime dependency. Before pip may execute build
 tooling, validation must use `validate_setuptools_wheelhouse()` from
-`test_foundation.py`. It first applies the repository cache-boundary checks,
+`_safety_support.py`. It first applies the repository cache-boundary checks,
 then rejects a missing, non-directory, symbolic-link, or out-of-cache
 wheelhouse, requires its sole filesystem entry to be the non-symlink regular
 wheel `setuptools-84.0.0-py3-none-any.whl`, and verifies its SHA-256 is
@@ -50,9 +50,12 @@ The mandatory order is:
    non-directories, and out-of-cache paths, removes only the exact validated
    directory, and confirms the path is absent;
 8. create a fresh disposable packaging venv with those variables set;
-9. invoke pip with those variables set and build isolation enabled;
-10. validate installed metadata with those variables still set; and
-11. after revalidating both exact paths, remove only the disposable venv and
+9. require the exact `src/codex_wsl_rpc.egg-info` path to be absent and reject
+   a symlink or any pre-existing entry before pip runs;
+10. invoke pip with those variables set and build isolation enabled;
+11. require the generated egg-info to be a non-symlink real directory whose
+    resolved parent is the repository `src`, then validate installed metadata; and
+12. remove only that validated egg-info directory, the disposable venv, and
     packaging temporary directory.
 
 The venv is never created over an existing directory or reused. After its
