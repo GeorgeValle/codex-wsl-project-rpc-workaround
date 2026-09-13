@@ -9,6 +9,7 @@ from .envelope import (
     Request,
     RequestId,
     SuccessResponse,
+    W3cTraceContext,
     parse_envelope,
 )
 from .errors import ProtocolDecodeError, ProtocolModelError
@@ -24,5 +25,6 @@ __all__ = [
     "Request",
     "RequestId",
     "SuccessResponse",
+    "W3cTraceContext",
     "parse_envelope",
 ]

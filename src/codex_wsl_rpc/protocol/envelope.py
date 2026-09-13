@@ -67,6 +67,28 @@ def _validate_json(value: object, path: str) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class W3cTraceContext:
+    """The optional W3C trace fields accepted by the pinned protocol."""
+
+    traceparent: str | None = None
+    tracestate: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.traceparent is not None:
+            _validate_string(self.traceparent, "trace.traceparent")
+        if self.tracestate is not None:
+            _validate_string(self.tracestate, "trace.tracestate")
+
+    def to_wire(self) -> dict[str, JsonValue]:
+        wire: dict[str, JsonValue] = {}
+        if self.traceparent is not None:
+            wire["traceparent"] = self.traceparent
+        if self.tracestate is not None:
+            wire["tracestate"] = self.tracestate
+        return wire
+
+
+@dataclass(frozen=True, slots=True)
 class ProtocolError:
     """The error value nested inside an error response."""
 
@@ -92,22 +114,24 @@ class Request:
     id: RequestId
     method: str
     params: JsonValue | None = None
-    trace: JsonValue | None = None
+    trace: W3cTraceContext | None = None
 
     def __post_init__(self) -> None:
         _validate_request_id(self.id)
         _validate_string(self.method, "method")
         if self.params is not None:
             _validate_json(self.params, "params")
-        if self.trace is not None:
-            _validate_json(self.trace, "trace")
+        if self.trace is not None and not isinstance(self.trace, W3cTraceContext):
+            raise ProtocolModelError(
+                f"trace: expected W3cTraceContext; got {_category(self.trace)}"
+            )
 
     def to_wire(self) -> dict[str, JsonValue]:
         wire: dict[str, JsonValue] = {"id": self.id, "method": self.method}
         if self.params is not None:
             wire["params"] = self.params
         if self.trace is not None:
-            wire["trace"] = self.trace
+            wire["trace"] = self.trace.to_wire()
         return wire
 
 
@@ -181,6 +205,20 @@ def _parse_error(value: object) -> ProtocolError:
     )  # type: ignore[return-value]
 
 
+def _parse_trace(value: object) -> W3cTraceContext | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ProtocolDecodeError(f"trace: expected object; got {_category(value)}")
+    try:
+        return W3cTraceContext(
+            traceparent=value.get("traceparent"),
+            tracestate=value.get("tracestate"),
+        )
+    except ProtocolModelError as error:
+        raise ProtocolDecodeError(str(error)) from error
+
+
 def parse_envelope(value: JsonValue) -> Envelope:
     """Decode one already-parsed JSON-compatible value into an envelope."""
 
@@ -205,7 +243,7 @@ def parse_envelope(value: JsonValue) -> Envelope:
             id=value["id"],
             method=value["method"],
             params=value.get("params"),
-            trace=value.get("trace"),
+            trace=_parse_trace(value.get("trace")),
         )
     if has_method and not has_id:
         return _construct(Notification, method=value["method"], params=value.get("params"))
