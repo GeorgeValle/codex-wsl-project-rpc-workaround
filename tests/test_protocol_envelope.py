@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import math
 from pathlib import Path
 import sys
@@ -117,12 +119,12 @@ class RequestTests(unittest.TestCase):
         wire["params"]["items"][0]["value"] = 3
         self.assertEqual(model.to_wire()["params"], {"items": [{"value": 1}]})
 
-    def test_params_are_recursively_immutable_on_the_model(self) -> None:
+    def test_public_params_are_json_compatible_and_isolated(self) -> None:
         model = Request(1, "x", params={"items": [{"value": 1}]})
-        with self.assertRaises(AttributeError):
-            model.params["items"].append({"value": 2})
-        with self.assertRaises(TypeError):
-            model.params["items"][0]["value"] = 2
+        exposed = model.params
+        self.assertEqual(json.loads(json.dumps(exposed)), exposed)
+        exposed["items"].append({"value": 2})
+        exposed["items"][0]["value"] = 3
         self.assertEqual(model.to_wire()["params"], {"items": [{"value": 1}]})
 
 
@@ -147,13 +149,18 @@ class SuccessResponseTests(unittest.TestCase):
         wire["result"]["items"][0].append(3)
         self.assertEqual(model.to_wire()["result"], {"items": [[1]]})
 
-    def test_result_is_recursively_immutable_on_the_model(self) -> None:
+    def test_public_result_is_json_compatible_and_isolated(self) -> None:
         model = SuccessResponse(1, {"items": [{"value": 1}]})
-        with self.assertRaises(AttributeError):
-            model.result["items"].append({"value": 2})
-        with self.assertRaises(TypeError):
-            model.result["items"][0]["value"] = 2
+        exposed = model.result
+        self.assertEqual(json.loads(json.dumps(exposed)), exposed)
+        exposed["items"].append({"value": 2})
+        exposed["items"][0]["value"] = 3
         self.assertEqual(model.to_wire()["result"], {"items": [{"value": 1}]})
+
+    def test_dataclasses_replace_preserves_public_payload(self) -> None:
+        model = SuccessResponse(1, {"items": [1]})
+        replaced = dataclasses.replace(model, id=2)
+        self.assertEqual(replaced, SuccessResponse(2, {"items": [1]}))
 
 
 class ErrorResponseTests(unittest.TestCase):
@@ -203,14 +210,14 @@ class ErrorResponseTests(unittest.TestCase):
             {"details": [{"reason": "original"}]},
         )
 
-    def test_error_data_is_recursively_immutable_on_the_model(self) -> None:
+    def test_public_error_data_is_json_compatible_and_isolated(self) -> None:
         model = ErrorResponse(
             1, ProtocolError(-1, "bad", {"items": [{"value": 1}]})
         )
-        with self.assertRaises(AttributeError):
-            model.error.data["items"].append({"value": 2})
-        with self.assertRaises(TypeError):
-            model.error.data["items"][0]["value"] = 2
+        exposed = model.error.data
+        self.assertEqual(json.loads(json.dumps(exposed)), exposed)
+        exposed["items"].append({"value": 2})
+        exposed["items"][0]["value"] = 3
         self.assertEqual(
             model.to_wire()["error"]["data"], {"items": [{"value": 1}]}
         )
@@ -241,12 +248,12 @@ class NotificationTests(unittest.TestCase):
         wire["params"]["items"][0]["value"] = 3
         self.assertEqual(model.to_wire()["params"], {"items": [{"value": 1}]})
 
-    def test_params_are_recursively_immutable_on_the_model(self) -> None:
+    def test_public_params_are_json_compatible_and_isolated(self) -> None:
         model = Notification("ready", {"items": [{"value": 1}]})
-        with self.assertRaises(AttributeError):
-            model.params["items"].append({"value": 2})
-        with self.assertRaises(TypeError):
-            model.params["items"][0]["value"] = 2
+        exposed = model.params
+        self.assertEqual(json.loads(json.dumps(exposed)), exposed)
+        exposed["items"].append({"value": 2})
+        exposed["items"][0]["value"] = 3
         self.assertEqual(model.to_wire()["params"], {"items": [{"value": 1}]})
 
 
@@ -406,6 +413,23 @@ class ClassificationAndPolicyTests(unittest.TestCase):
             parse_envelope({"id": 1, "error": {"code": -1, "message": "x", "future": 2}}),
             ErrorResponse(1, ProtocolError(-1, "x")),
         )
+
+    def test_complete_input_tree_is_validated_before_classification(self) -> None:
+        invalid_unknown_values = [
+            math.nan,
+            {"nested": math.inf},
+            {"value": 10**400},
+        ]
+        for future in invalid_unknown_values:
+            with self.subTest(future=future):
+                with self.assertRaises(ProtocolDecodeError):
+                    parse_envelope({"id": 1, "result": "ok", "future": future})
+
+    def test_valid_unknown_json_value_is_still_ignored(self) -> None:
+        model = parse_envelope(
+            {"id": 1, "result": "ok", "future": {"valid": [1, 2, 3]}}
+        )
+        self.assertEqual(model, SuccessResponse(1, "ok"))
 
     def test_jsonrpc_is_ignored_like_other_unknown_members(self) -> None:
         request = parse_envelope(

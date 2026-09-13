@@ -7,7 +7,7 @@ does not emit or require ``jsonrpc`` on the wire.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass, field
 import math
 from types import MappingProxyType
 from typing import Callable, TypeAlias
@@ -118,18 +118,27 @@ class ProtocolError:
 
     code: int
     message: str
-    data: JsonValue | None = None
+    data: InitVar[JsonValue | None] = None
+    _data_frozen: FrozenJsonValue | None = field(init=False, repr=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, data: JsonValue | None) -> None:
         _validate_i64(self.code, "error.code")
         _validate_string(self.message, "error.message")
-        if self.data is not None:
-            object.__setattr__(self, "data", _freeze_json(self.data, "error.data"))
+        object.__setattr__(
+            self,
+            "_data_frozen",
+            None if data is None else _freeze_json(data, "error.data"),
+        )
+
+    def _get_data(self) -> JsonValue | None:
+        if self._data_frozen is None:
+            return None
+        return _thaw_json(self._data_frozen)
 
     def to_wire(self) -> dict[str, JsonValue]:
         wire: dict[str, JsonValue] = {"code": self.code, "message": self.message}
-        if self.data is not None:
-            wire["data"] = _thaw_json(self.data)
+        if self._data_frozen is not None:
+            wire["data"] = _thaw_json(self._data_frozen)
         return wire
 
 
@@ -137,23 +146,32 @@ class ProtocolError:
 class Request:
     id: RequestId
     method: str
-    params: JsonValue | None = None
+    params: InitVar[JsonValue | None] = None
     trace: W3cTraceContext | None = None
+    _params_frozen: FrozenJsonValue | None = field(init=False, repr=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, params: JsonValue | None) -> None:
         _validate_request_id(self.id)
         _validate_string(self.method, "method")
-        if self.params is not None:
-            object.__setattr__(self, "params", _freeze_json(self.params, "params"))
+        object.__setattr__(
+            self,
+            "_params_frozen",
+            None if params is None else _freeze_json(params, "params"),
+        )
         if self.trace is not None and not isinstance(self.trace, W3cTraceContext):
             raise ProtocolModelError(
                 f"trace: expected W3cTraceContext; got {_category(self.trace)}"
             )
 
+    def _get_params(self) -> JsonValue | None:
+        if self._params_frozen is None:
+            return None
+        return _thaw_json(self._params_frozen)
+
     def to_wire(self) -> dict[str, JsonValue]:
         wire: dict[str, JsonValue] = {"id": self.id, "method": self.method}
-        if self.params is not None:
-            wire["params"] = _thaw_json(self.params)
+        if self._params_frozen is not None:
+            wire["params"] = _thaw_json(self._params_frozen)
         if self.trace is not None:
             wire["trace"] = self.trace.to_wire()
         return wire
@@ -162,14 +180,22 @@ class Request:
 @dataclass(frozen=True, slots=True)
 class SuccessResponse:
     id: RequestId
-    result: JsonValue
+    result: InitVar[JsonValue]
+    _result_frozen: FrozenJsonValue = field(init=False, repr=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, result: JsonValue) -> None:
         _validate_request_id(self.id)
-        object.__setattr__(self, "result", _freeze_json(self.result, "result"))
+        object.__setattr__(self, "_result_frozen", _freeze_json(result, "result"))
+
+    def _get_result(self) -> JsonValue:
+        return _thaw_json(self._result_frozen)
+
+    @property
+    def result(self) -> JsonValue:
+        return self._get_result()
 
     def to_wire(self) -> dict[str, JsonValue]:
-        return {"id": self.id, "result": _thaw_json(self.result)}
+        return {"id": self.id, "result": _thaw_json(self._result_frozen)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,18 +217,34 @@ class ErrorResponse:
 @dataclass(frozen=True, slots=True)
 class Notification:
     method: str
-    params: JsonValue | None = None
+    params: InitVar[JsonValue | None] = None
+    _params_frozen: FrozenJsonValue | None = field(init=False, repr=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, params: JsonValue | None) -> None:
         _validate_string(self.method, "method")
-        if self.params is not None:
-            object.__setattr__(self, "params", _freeze_json(self.params, "params"))
+        object.__setattr__(
+            self,
+            "_params_frozen",
+            None if params is None else _freeze_json(params, "params"),
+        )
+
+    def _get_params(self) -> JsonValue | None:
+        if self._params_frozen is None:
+            return None
+        return _thaw_json(self._params_frozen)
 
     def to_wire(self) -> dict[str, JsonValue]:
         wire: dict[str, JsonValue] = {"method": self.method}
-        if self.params is not None:
-            wire["params"] = _thaw_json(self.params)
+        if self._params_frozen is not None:
+            wire["params"] = _thaw_json(self._params_frozen)
         return wire
+
+
+# InitVar keeps the public constructor names available to dataclasses.replace;
+# properties then expose fresh JSON-compatible copies rather than frozen storage.
+ProtocolError.data = property(ProtocolError._get_data)  # type: ignore[assignment]
+Request.params = property(Request._get_params)  # type: ignore[assignment]
+Notification.params = property(Notification._get_params)  # type: ignore[assignment]
 
 
 Envelope: TypeAlias = Request | SuccessResponse | ErrorResponse | Notification
@@ -257,6 +299,10 @@ def _try_candidate(factory: Callable[[], Envelope]) -> Envelope | None:
 def parse_envelope(value: JsonValue) -> Envelope:
     """Decode one already-parsed JSON-compatible value into an envelope."""
 
+    try:
+        _freeze_json(value, "envelope")
+    except ProtocolModelError as error:
+        raise ProtocolDecodeError(str(error)) from error
     if not isinstance(value, dict):
         raise ProtocolDecodeError(f"envelope: expected object; got {_category(value)}")
     has_id = "id" in value
