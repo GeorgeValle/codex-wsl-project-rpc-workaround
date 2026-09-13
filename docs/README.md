@@ -6,8 +6,8 @@
   Subdivisions.
 - [Pull-request contract](pull-request-contract.md) defines the required format
   for auditable delivery records.
+- [Public app-server Project protocol research](protocol/app-server-projects.md)
+  is the pinned, source-classified technical reference for future modeling.
 
 GitHub Pull Requests are historical delivery evidence, not stable roadmap
-identities. Future protocol documentation will record sourced protocol facts
-and clearly separated hypotheses; it does not exist in this non-functional
-foundation.
+identities. Protocol research does not itself add a functional capability.
