@@ -72,21 +72,18 @@ def _snapshot_json(value: object, path: str) -> JsonValue:
 
 @dataclass(frozen=True, slots=True)
 class W3cTraceContext:
-    """The optional W3C trace fields accepted by the pinned protocol."""
+    """The W3C trace fields accepted by the pinned protocol."""
 
-    traceparent: str | None = None
+    traceparent: str
     tracestate: str | None = None
 
     def __post_init__(self) -> None:
-        if self.traceparent is not None:
-            _validate_string(self.traceparent, "trace.traceparent")
+        _validate_string(self.traceparent, "trace.traceparent")
         if self.tracestate is not None:
             _validate_string(self.tracestate, "trace.tracestate")
 
     def to_wire(self) -> dict[str, JsonValue]:
-        wire: dict[str, JsonValue] = {}
-        if self.traceparent is not None:
-            wire["traceparent"] = self.traceparent
+        wire: dict[str, JsonValue] = {"traceparent": self.traceparent}
         if self.tracestate is not None:
             wire["tracestate"] = self.tracestate
         return wire
@@ -214,9 +211,11 @@ def _parse_trace(value: object) -> W3cTraceContext | None:
         return None
     if not isinstance(value, dict):
         raise ProtocolDecodeError(f"trace: expected object; got {_category(value)}")
+    if "traceparent" not in value:
+        raise ProtocolDecodeError("trace: missing required member traceparent")
     try:
         return W3cTraceContext(
-            traceparent=value.get("traceparent"),
+            traceparent=value["traceparent"],
             tracestate=value.get("tracestate"),
         )
     except ProtocolModelError as error:

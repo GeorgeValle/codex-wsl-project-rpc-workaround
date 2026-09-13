@@ -48,9 +48,7 @@ class RequestTests(unittest.TestCase):
 
     def test_trace_context_shapes_round_trip(self) -> None:
         contexts = [
-            W3cTraceContext(),
             W3cTraceContext(traceparent="parent"),
-            W3cTraceContext(tracestate="state"),
             W3cTraceContext(traceparent="parent", tracestate="state"),
         ]
         for context in contexts:
@@ -60,17 +58,21 @@ class RequestTests(unittest.TestCase):
 
     def test_trace_serialization_omits_none_members(self) -> None:
         self.assertEqual(
-            Request(1, "x", trace=W3cTraceContext()).to_wire(),
-            {"id": 1, "method": "x", "trace": {}},
-        )
-        self.assertEqual(
             W3cTraceContext(traceparent="parent").to_wire(),
             {"traceparent": "parent"},
         )
         self.assertEqual(
-            W3cTraceContext(tracestate="state").to_wire(),
-            {"tracestate": "state"},
+            W3cTraceContext(traceparent="parent", tracestate="state").to_wire(),
+            {"traceparent": "parent", "tracestate": "state"},
         )
+
+    def test_traceparent_is_required_for_local_construction(self) -> None:
+        with self.assertRaises(TypeError):
+            W3cTraceContext()
+        for traceparent in (None, 123):
+            with self.subTest(traceparent=traceparent):
+                with self.assertRaises(ProtocolModelError):
+                    W3cTraceContext(traceparent=traceparent)
 
     def test_invalid_local_trace_values_raise_model_error(self) -> None:
         for trace in (1, [], {"traceparent": 1}):
@@ -79,7 +81,15 @@ class RequestTests(unittest.TestCase):
                     Request(1, "x", trace=trace)
 
     def test_invalid_wire_trace_values_raise_decode_error(self) -> None:
-        traces = [1, [], {"traceparent": 1}, {"tracestate": []}]
+        traces = [
+            1,
+            [],
+            {},
+            {"tracestate": "state"},
+            {"traceparent": None},
+            {"traceparent": 123},
+            {"traceparent": "parent", "tracestate": []},
+        ]
         for trace in traces:
             with self.subTest(trace=trace):
                 with self.assertRaises(ProtocolDecodeError):
@@ -87,8 +97,14 @@ class RequestTests(unittest.TestCase):
 
     def test_trace_unknown_members_follow_pinned_serde_policy(self) -> None:
         self.assertEqual(
-            parse_envelope({"id": 1, "method": "x", "trace": {"future": 1}}),
-            Request(1, "x", trace=W3cTraceContext()),
+            parse_envelope(
+                {
+                    "id": 1,
+                    "method": "x",
+                    "trace": {"traceparent": "parent", "future": 1},
+                }
+            ),
+            Request(1, "x", trace=W3cTraceContext(traceparent="parent")),
         )
 
     def test_params_are_snapshotted_at_construction_and_serialization(self) -> None:
