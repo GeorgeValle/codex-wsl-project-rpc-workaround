@@ -17,8 +17,11 @@ See the [Block 1 index](block-1/README.md).
 ## Block 2 — Protocol Understanding and Read-Only Access
 
 - **Subdivision 2.1 — Public Codex app-server protocol research**
+  ([detail](block-2/subdivision-2.1-protocol-research.md))
 - **Subdivision 2.2 — Mock protocol transport and schemas**
 - **Subdivision 2.3 — Read-only real project/list integration**
+
+See the [Block 2 index](block-2/README.md).
 
 ## Block 3 — Controlled Project Mutation
 
