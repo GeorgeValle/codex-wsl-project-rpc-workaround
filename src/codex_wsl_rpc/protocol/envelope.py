@@ -44,25 +44,29 @@ def _validate_string(value: object, path: str) -> None:
         raise ProtocolModelError(f"{path}: expected string; got {_category(value)}")
 
 
-def _validate_json(value: object, path: str) -> None:
+def _snapshot_json(value: object, path: str) -> JsonValue:
+    """Validate and recursively copy one value in the supported JSON domain."""
+
     if value is None or isinstance(value, (bool, str)):
-        return
+        return value
     if isinstance(value, int):
-        return
+        return value
     if isinstance(value, float):
         if math.isfinite(value):
-            return
+            return value
         raise ProtocolModelError(f"{path}: expected a finite JSON number")
     if isinstance(value, list):
-        for index, item in enumerate(value):
-            _validate_json(item, f"{path}[{index}]")
-        return
+        return [
+            _snapshot_json(item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
     if isinstance(value, dict):
+        snapshot: dict[str, JsonValue] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ProtocolModelError(f"{path}: expected object keys to be strings")
-            _validate_json(item, f"{path}.{key}")
-        return
+            snapshot[key] = _snapshot_json(item, f"{path}.{key}")
+        return snapshot
     raise ProtocolModelError(f"{path}: expected a JSON-compatible value; got {_category(value)}")
 
 
@@ -100,12 +104,12 @@ class ProtocolError:
         _validate_i64(self.code, "error.code")
         _validate_string(self.message, "error.message")
         if self.data is not None:
-            _validate_json(self.data, "error.data")
+            object.__setattr__(self, "data", _snapshot_json(self.data, "error.data"))
 
     def to_wire(self) -> dict[str, JsonValue]:
         wire: dict[str, JsonValue] = {"code": self.code, "message": self.message}
         if self.data is not None:
-            wire["data"] = self.data
+            wire["data"] = _snapshot_json(self.data, "error.data")
         return wire
 
 
@@ -120,7 +124,7 @@ class Request:
         _validate_request_id(self.id)
         _validate_string(self.method, "method")
         if self.params is not None:
-            _validate_json(self.params, "params")
+            object.__setattr__(self, "params", _snapshot_json(self.params, "params"))
         if self.trace is not None and not isinstance(self.trace, W3cTraceContext):
             raise ProtocolModelError(
                 f"trace: expected W3cTraceContext; got {_category(self.trace)}"
@@ -129,7 +133,7 @@ class Request:
     def to_wire(self) -> dict[str, JsonValue]:
         wire: dict[str, JsonValue] = {"id": self.id, "method": self.method}
         if self.params is not None:
-            wire["params"] = self.params
+            wire["params"] = _snapshot_json(self.params, "params")
         if self.trace is not None:
             wire["trace"] = self.trace.to_wire()
         return wire
@@ -142,10 +146,10 @@ class SuccessResponse:
 
     def __post_init__(self) -> None:
         _validate_request_id(self.id)
-        _validate_json(self.result, "result")
+        object.__setattr__(self, "result", _snapshot_json(self.result, "result"))
 
     def to_wire(self) -> dict[str, JsonValue]:
-        return {"id": self.id, "result": self.result}
+        return {"id": self.id, "result": _snapshot_json(self.result, "result")}
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,12 +176,12 @@ class Notification:
     def __post_init__(self) -> None:
         _validate_string(self.method, "method")
         if self.params is not None:
-            _validate_json(self.params, "params")
+            object.__setattr__(self, "params", _snapshot_json(self.params, "params"))
 
     def to_wire(self) -> dict[str, JsonValue]:
         wire: dict[str, JsonValue] = {"method": self.method}
         if self.params is not None:
-            wire["params"] = self.params
+            wire["params"] = _snapshot_json(self.params, "params")
         return wire
 
 

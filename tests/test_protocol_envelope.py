@@ -91,6 +91,14 @@ class RequestTests(unittest.TestCase):
             Request(1, "x", trace=W3cTraceContext()),
         )
 
+    def test_params_are_snapshotted_at_construction_and_serialization(self) -> None:
+        params = {"items": [{"value": 1}]}
+        model = Request(1, "x", params=params)
+        params["items"][0]["value"] = 2
+        wire = model.to_wire()
+        wire["params"]["items"][0]["value"] = 3
+        self.assertEqual(model.to_wire()["params"], {"items": [{"value": 1}]})
+
 
 class SuccessResponseTests(unittest.TestCase):
     def test_result_values_and_id_types_round_trip(self) -> None:
@@ -103,6 +111,14 @@ class SuccessResponseTests(unittest.TestCase):
             with self.subTest(model=model):
                 self.assertEqual(parse_envelope(model.to_wire()), model)
                 self.assertIn("result", model.to_wire())
+
+    def test_result_is_snapshotted_at_construction_and_serialization(self) -> None:
+        result = {"items": [[1]]}
+        model = SuccessResponse(1, result)
+        result["items"][0].append(2)
+        wire = model.to_wire()
+        wire["result"]["items"][0].append(3)
+        self.assertEqual(model.to_wire()["result"], {"items": [[1]]})
 
 
 class ErrorResponseTests(unittest.TestCase):
@@ -140,6 +156,17 @@ class ErrorResponseTests(unittest.TestCase):
                 with self.assertRaises(ProtocolModelError):
                     ProtocolError(code, "x")
 
+    def test_error_data_is_snapshotted_through_response_serialization(self) -> None:
+        data = {"details": [{"reason": "original"}]}
+        model = ErrorResponse(1, ProtocolError(-1, "bad", data))
+        data["details"][0]["reason"] = "input mutation"
+        wire = model.to_wire()
+        wire["error"]["data"]["details"][0]["reason"] = "wire mutation"
+        self.assertEqual(
+            model.to_wire()["error"]["data"],
+            {"details": [{"reason": "original"}]},
+        )
+
 
 class NotificationTests(unittest.TestCase):
     def test_exact_shapes(self) -> None:
@@ -156,6 +183,14 @@ class NotificationTests(unittest.TestCase):
 
     def test_null_params_normalizes_to_absent(self) -> None:
         self.assertEqual(parse_envelope({"method": "ready", "params": None}), Notification("ready"))
+
+    def test_params_are_snapshotted_at_construction_and_serialization(self) -> None:
+        params = {"items": [{"value": 1}]}
+        model = Notification("ready", params)
+        params["items"][0]["value"] = 2
+        wire = model.to_wire()
+        wire["params"]["items"][0]["value"] = 3
+        self.assertEqual(model.to_wire()["params"], {"items": [{"value": 1}]})
 
 
 class RequestIdTests(unittest.TestCase):
@@ -220,10 +255,16 @@ class ClassificationAndPolicyTests(unittest.TestCase):
             parse_envelope({"jsonrpc": "2.0", "id": 1, "method": "x"})
 
     def test_non_json_values_are_rejected(self) -> None:
-        for result in ((1, 2), math.inf, {1: "value"}):
+        for result in ((1, 2), math.inf, {1: "value"}, {"nested": object()}):
             with self.subTest(result=result):
                 with self.assertRaises(ProtocolModelError):
                     SuccessResponse(1, result)
+
+    def test_decoded_payload_is_snapshotted(self) -> None:
+        source = {"id": 1, "result": {"items": [1]}}
+        model = parse_envelope(source)
+        source["result"]["items"].append(2)
+        self.assertEqual(model.to_wire()["result"], {"items": [1]})
 
 
 if __name__ == "__main__":
