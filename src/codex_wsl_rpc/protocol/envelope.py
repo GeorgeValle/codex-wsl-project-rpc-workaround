@@ -20,6 +20,7 @@ RequestId: TypeAlias = str | int
 
 _I64_MIN = -(2**63)
 _I64_MAX = 2**63 - 1
+_U64_MAX = 2**64 - 1
 
 
 def _category(value: object) -> str:
@@ -45,11 +46,19 @@ def _validate_string(value: object, path: str) -> None:
 
 
 def _snapshot_json(value: object, path: str) -> JsonValue:
-    """Validate and recursively copy one value in the supported JSON domain."""
+    """Validate and recursively copy one value in the supported JSON domain.
+
+    Normal ``serde_json::Number`` stores integers directly as ``i64`` or
+    ``u64`` and otherwise uses a finite ``f64``.  LOCAL MOCK POLICY: Python
+    integers must fit the direct integer storage range; this codec rejects
+    larger integers instead of silently changing their value or type to float.
+    """
 
     if value is None or isinstance(value, (bool, str)):
         return value
     if isinstance(value, int):
+        if not _I64_MIN <= value <= _U64_MAX:
+            raise ProtocolModelError(f"{path}: JSON integer is out of range")
         return value
     if isinstance(value, float):
         if math.isfinite(value):

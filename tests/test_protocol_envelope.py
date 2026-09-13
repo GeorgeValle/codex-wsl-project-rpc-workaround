@@ -234,6 +234,34 @@ class RequestIdTests(unittest.TestCase):
                     parse_envelope({"id": request_id, "method": "x"})
 
 
+class GenericJsonNumberTests(unittest.TestCase):
+    def test_small_integer_and_direct_integer_boundaries_are_accepted(self) -> None:
+        for result in (1, -(2**63), 2**64 - 1):
+            with self.subTest(result=result):
+                model = SuccessResponse(1, result)
+                self.assertEqual(model.to_wire()["result"], result)
+
+    def test_values_immediately_outside_direct_integer_boundaries_are_rejected(self) -> None:
+        for result in (-(2**63) - 1, 2**64):
+            with self.subTest(result=result):
+                with self.assertRaises(ProtocolModelError):
+                    SuccessResponse(1, result)
+
+    def test_oversized_integer_is_rejected_at_construction(self) -> None:
+        with self.assertRaises(ProtocolModelError):
+            SuccessResponse(1, 10**400)
+
+    def test_nested_oversized_integer_is_rejected_at_construction(self) -> None:
+        with self.assertRaises(ProtocolModelError):
+            SuccessResponse(1, {"items": [10**400]})
+
+    def test_oversized_integer_is_rejected_during_decode(self) -> None:
+        for result in (10**400, {"items": [10**400]}):
+            with self.subTest(result=result):
+                with self.assertRaises(ProtocolDecodeError):
+                    parse_envelope({"id": 1, "result": result})
+
+
 class ClassificationAndPolicyTests(unittest.TestCase):
     def test_four_envelopes_are_classified(self) -> None:
         cases = [
