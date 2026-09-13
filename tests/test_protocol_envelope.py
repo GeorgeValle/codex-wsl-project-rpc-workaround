@@ -80,7 +80,7 @@ class RequestTests(unittest.TestCase):
                 with self.assertRaises(ProtocolModelError):
                     Request(1, "x", trace=trace)
 
-    def test_invalid_wire_trace_values_raise_decode_error(self) -> None:
+    def test_invalid_request_trace_values_fall_through_to_notification(self) -> None:
         traces = [
             1,
             [],
@@ -92,8 +92,10 @@ class RequestTests(unittest.TestCase):
         ]
         for trace in traces:
             with self.subTest(trace=trace):
-                with self.assertRaises(ProtocolDecodeError):
-                    parse_envelope({"id": 1, "method": "x", "trace": trace})
+                self.assertEqual(
+                    parse_envelope({"id": 1, "method": "x", "trace": trace}),
+                    Notification("x"),
+                )
 
     def test_trace_unknown_members_follow_pinned_serde_policy(self) -> None:
         self.assertEqual(
@@ -267,7 +269,7 @@ class RequestIdTests(unittest.TestCase):
         for request_id in (True, None, 1.0, []):
             with self.subTest(request_id=request_id):
                 with self.assertRaises(ProtocolDecodeError):
-                    parse_envelope({"id": request_id, "method": "x"})
+                    parse_envelope({"id": request_id, "result": "ok"})
 
 
 class GenericJsonNumberTests(unittest.TestCase):
@@ -330,6 +332,39 @@ class ClassificationAndPolicyTests(unittest.TestCase):
         )
         self.assertIsInstance(model, SuccessResponse)
         self.assertEqual(model.to_wire(), {"id": 1, "result": {"ok": True}})
+
+    def test_invalid_request_falls_through_to_success_response(self) -> None:
+        model = parse_envelope({"id": 1, "method": 2, "result": "ok"})
+        self.assertEqual(model, SuccessResponse(1, "ok"))
+
+    def test_invalid_request_falls_through_to_error_response(self) -> None:
+        model = parse_envelope(
+            {
+                "id": 1,
+                "method": 2,
+                "error": {"code": -1, "message": "failed"},
+            }
+        )
+        self.assertEqual(model, ErrorResponse(1, ProtocolError(-1, "failed")))
+
+    def test_valid_request_wins_over_later_candidate(self) -> None:
+        model = parse_envelope({"id": 1, "method": "x", "result": "ignored"})
+        self.assertEqual(model, Request(1, "x"))
+
+    def test_valid_notification_wins_over_later_candidate(self) -> None:
+        model = parse_envelope({"method": "x", "id": [], "result": "ignored"})
+        self.assertEqual(model, Notification("x"))
+
+    def test_all_present_candidates_can_fail(self) -> None:
+        with self.assertRaises(ProtocolDecodeError):
+            parse_envelope(
+                {
+                    "id": [],
+                    "method": 2,
+                    "result": object(),
+                    "error": {"code": "bad", "message": 3},
+                }
+            )
 
     def test_error_response_is_selected_without_result(self) -> None:
         model = parse_envelope(

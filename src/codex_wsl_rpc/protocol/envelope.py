@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from types import MappingProxyType
-from typing import TypeAlias
+from typing import Callable, TypeAlias
 
 from .errors import ProtocolDecodeError, ProtocolModelError
 
@@ -245,6 +245,15 @@ def _parse_trace(value: object) -> W3cTraceContext | None:
         raise ProtocolDecodeError(str(error)) from error
 
 
+def _try_candidate(factory: Callable[[], Envelope]) -> Envelope | None:
+    """Return a constructed candidate, or allow an expected decode failure to fall through."""
+
+    try:
+        return factory()
+    except ProtocolDecodeError:
+        return None
+
+
 def parse_envelope(value: JsonValue) -> Envelope:
     """Decode one already-parsed JSON-compatible value into an envelope."""
 
@@ -255,19 +264,40 @@ def parse_envelope(value: JsonValue) -> Envelope:
     has_result = "result" in value
     has_error = "error" in value
 
+    candidates: list[Callable[[], Envelope]] = []
     if has_id and has_method:
-        return _construct(
-            Request,
-            id=value["id"],
-            method=value["method"],
-            params=value.get("params"),
-            trace=_parse_trace(value.get("trace")),
+        candidates.append(
+            lambda: _construct(
+                Request,
+                id=value["id"],
+                method=value["method"],
+                params=value.get("params"),
+                trace=_parse_trace(value.get("trace")),
+            )
         )
-    if has_method and not has_id:
-        return _construct(Notification, method=value["method"], params=value.get("params"))
+    if has_method:
+        candidates.append(
+            lambda: _construct(
+                Notification,
+                method=value["method"],
+                params=value.get("params"),
+            )
+        )
     if has_id and has_result:
-        return _construct(SuccessResponse, id=value["id"], result=value["result"])
+        candidates.append(
+            lambda: _construct(SuccessResponse, id=value["id"], result=value["result"])
+        )
     if has_id and has_error:
-        error = _parse_error(value["error"])
-        return _construct(ErrorResponse, id=value["id"], error=error)
+        candidates.append(
+            lambda: _construct(
+                ErrorResponse,
+                id=value["id"],
+                error=_parse_error(value["error"]),
+            )
+        )
+
+    for factory in candidates:
+        candidate = _try_candidate(factory)
+        if candidate is not None:
+            return candidate
     raise ProtocolDecodeError("envelope: value does not match a supported envelope")
