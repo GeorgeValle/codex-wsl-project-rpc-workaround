@@ -115,6 +115,14 @@ class RequestTests(unittest.TestCase):
         wire["params"]["items"][0]["value"] = 3
         self.assertEqual(model.to_wire()["params"], {"items": [{"value": 1}]})
 
+    def test_params_are_recursively_immutable_on_the_model(self) -> None:
+        model = Request(1, "x", params={"items": [{"value": 1}]})
+        with self.assertRaises(AttributeError):
+            model.params["items"].append({"value": 2})
+        with self.assertRaises(TypeError):
+            model.params["items"][0]["value"] = 2
+        self.assertEqual(model.to_wire()["params"], {"items": [{"value": 1}]})
+
 
 class SuccessResponseTests(unittest.TestCase):
     def test_result_values_and_id_types_round_trip(self) -> None:
@@ -136,6 +144,14 @@ class SuccessResponseTests(unittest.TestCase):
         wire = model.to_wire()
         wire["result"]["items"][0].append(3)
         self.assertEqual(model.to_wire()["result"], {"items": [[1]]})
+
+    def test_result_is_recursively_immutable_on_the_model(self) -> None:
+        model = SuccessResponse(1, {"items": [{"value": 1}]})
+        with self.assertRaises(AttributeError):
+            model.result["items"].append({"value": 2})
+        with self.assertRaises(TypeError):
+            model.result["items"][0]["value"] = 2
+        self.assertEqual(model.to_wire()["result"], {"items": [{"value": 1}]})
 
 
 class ErrorResponseTests(unittest.TestCase):
@@ -185,6 +201,18 @@ class ErrorResponseTests(unittest.TestCase):
             {"details": [{"reason": "original"}]},
         )
 
+    def test_error_data_is_recursively_immutable_on_the_model(self) -> None:
+        model = ErrorResponse(
+            1, ProtocolError(-1, "bad", {"items": [{"value": 1}]})
+        )
+        with self.assertRaises(AttributeError):
+            model.error.data["items"].append({"value": 2})
+        with self.assertRaises(TypeError):
+            model.error.data["items"][0]["value"] = 2
+        self.assertEqual(
+            model.to_wire()["error"]["data"], {"items": [{"value": 1}]}
+        )
+
 
 class NotificationTests(unittest.TestCase):
     def test_exact_shapes(self) -> None:
@@ -209,6 +237,14 @@ class NotificationTests(unittest.TestCase):
         params["items"][0]["value"] = 2
         wire = model.to_wire()
         wire["params"]["items"][0]["value"] = 3
+        self.assertEqual(model.to_wire()["params"], {"items": [{"value": 1}]})
+
+    def test_params_are_recursively_immutable_on_the_model(self) -> None:
+        model = Notification("ready", {"items": [{"value": 1}]})
+        with self.assertRaises(AttributeError):
+            model.params["items"].append({"value": 2})
+        with self.assertRaises(TypeError):
+            model.params["items"][0]["value"] = 2
         self.assertEqual(model.to_wire()["params"], {"items": [{"value": 1}]})
 
 
@@ -274,9 +310,8 @@ class ClassificationAndPolicyTests(unittest.TestCase):
             with self.subTest(wire=wire):
                 self.assertIsInstance(parse_envelope(wire), expected)
 
-    def test_ambiguous_unmatched_and_non_object_values_are_rejected(self) -> None:
+    def test_unmatched_and_non_object_values_are_rejected(self) -> None:
         values = [
-            {"id": 1, "result": None, "error": {"code": -1, "message": "x"}},
             {"id": 1},
             [],
         ]
@@ -284,6 +319,23 @@ class ClassificationAndPolicyTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ProtocolDecodeError):
                     parse_envelope(value)
+
+    def test_success_response_wins_when_result_and_error_are_present(self) -> None:
+        model = parse_envelope(
+            {
+                "id": 1,
+                "result": {"ok": True},
+                "error": {"code": -1, "message": "ignored"},
+            }
+        )
+        self.assertIsInstance(model, SuccessResponse)
+        self.assertEqual(model.to_wire(), {"id": 1, "result": {"ok": True}})
+
+    def test_error_response_is_selected_without_result(self) -> None:
+        model = parse_envelope(
+            {"id": 1, "error": {"code": -1, "message": "failed"}}
+        )
+        self.assertIsInstance(model, ErrorResponse)
 
     def test_requests_ignore_response_named_extra_members(self) -> None:
         cases = [

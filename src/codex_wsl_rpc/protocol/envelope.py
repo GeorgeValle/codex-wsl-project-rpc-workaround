@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from types import MappingProxyType
 from typing import TypeAlias
 
 from .errors import ProtocolDecodeError, ProtocolModelError
@@ -16,6 +17,9 @@ from .errors import ProtocolDecodeError, ProtocolModelError
 
 JsonScalar: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
+FrozenJsonValue: TypeAlias = (
+    JsonScalar | tuple["FrozenJsonValue", ...] | MappingProxyType[str, "FrozenJsonValue"]
+)
 RequestId: TypeAlias = str | int
 
 _I64_MIN = -(2**63)
@@ -45,8 +49,8 @@ def _validate_string(value: object, path: str) -> None:
         raise ProtocolModelError(f"{path}: expected string; got {_category(value)}")
 
 
-def _snapshot_json(value: object, path: str) -> JsonValue:
-    """Validate and recursively copy one value in the supported JSON domain.
+def _freeze_json(value: object, path: str) -> FrozenJsonValue:
+    """Validate and recursively freeze one value in the supported JSON domain.
 
     Normal ``serde_json::Number`` stores integers directly as ``i64`` or
     ``u64`` and otherwise uses a finite ``f64``.  LOCAL MOCK POLICY: Python
@@ -65,18 +69,28 @@ def _snapshot_json(value: object, path: str) -> JsonValue:
             return value
         raise ProtocolModelError(f"{path}: expected a finite JSON number")
     if isinstance(value, list):
-        return [
-            _snapshot_json(item, f"{path}[{index}]")
+        return tuple(
+            _freeze_json(item, f"{path}[{index}]")
             for index, item in enumerate(value)
-        ]
+        )
     if isinstance(value, dict):
-        snapshot: dict[str, JsonValue] = {}
+        frozen: dict[str, FrozenJsonValue] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ProtocolModelError(f"{path}: expected object keys to be strings")
-            snapshot[key] = _snapshot_json(item, f"{path}.{key}")
-        return snapshot
+            frozen[key] = _freeze_json(item, f"{path}.{key}")
+        return MappingProxyType(frozen)
     raise ProtocolModelError(f"{path}: expected a JSON-compatible value; got {_category(value)}")
+
+
+def _thaw_json(value: FrozenJsonValue) -> JsonValue:
+    """Return a fresh ordinary JSON-compatible representation of a frozen value."""
+
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    if isinstance(value, MappingProxyType):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,12 +124,12 @@ class ProtocolError:
         _validate_i64(self.code, "error.code")
         _validate_string(self.message, "error.message")
         if self.data is not None:
-            object.__setattr__(self, "data", _snapshot_json(self.data, "error.data"))
+            object.__setattr__(self, "data", _freeze_json(self.data, "error.data"))
 
     def to_wire(self) -> dict[str, JsonValue]:
         wire: dict[str, JsonValue] = {"code": self.code, "message": self.message}
         if self.data is not None:
-            wire["data"] = _snapshot_json(self.data, "error.data")
+            wire["data"] = _thaw_json(self.data)
         return wire
 
 
@@ -130,7 +144,7 @@ class Request:
         _validate_request_id(self.id)
         _validate_string(self.method, "method")
         if self.params is not None:
-            object.__setattr__(self, "params", _snapshot_json(self.params, "params"))
+            object.__setattr__(self, "params", _freeze_json(self.params, "params"))
         if self.trace is not None and not isinstance(self.trace, W3cTraceContext):
             raise ProtocolModelError(
                 f"trace: expected W3cTraceContext; got {_category(self.trace)}"
@@ -139,7 +153,7 @@ class Request:
     def to_wire(self) -> dict[str, JsonValue]:
         wire: dict[str, JsonValue] = {"id": self.id, "method": self.method}
         if self.params is not None:
-            wire["params"] = _snapshot_json(self.params, "params")
+            wire["params"] = _thaw_json(self.params)
         if self.trace is not None:
             wire["trace"] = self.trace.to_wire()
         return wire
@@ -152,10 +166,10 @@ class SuccessResponse:
 
     def __post_init__(self) -> None:
         _validate_request_id(self.id)
-        object.__setattr__(self, "result", _snapshot_json(self.result, "result"))
+        object.__setattr__(self, "result", _freeze_json(self.result, "result"))
 
     def to_wire(self) -> dict[str, JsonValue]:
-        return {"id": self.id, "result": _snapshot_json(self.result, "result")}
+        return {"id": self.id, "result": _thaw_json(self.result)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,12 +196,12 @@ class Notification:
     def __post_init__(self) -> None:
         _validate_string(self.method, "method")
         if self.params is not None:
-            object.__setattr__(self, "params", _snapshot_json(self.params, "params"))
+            object.__setattr__(self, "params", _freeze_json(self.params, "params"))
 
     def to_wire(self) -> dict[str, JsonValue]:
         wire: dict[str, JsonValue] = {"method": self.method}
         if self.params is not None:
-            wire["params"] = _snapshot_json(self.params, "params")
+            wire["params"] = _thaw_json(self.params)
         return wire
 
 
@@ -251,8 +265,6 @@ def parse_envelope(value: JsonValue) -> Envelope:
         )
     if has_method and not has_id:
         return _construct(Notification, method=value["method"], params=value.get("params"))
-    if has_result and has_error:
-        raise ProtocolDecodeError("envelope: result and error are mutually exclusive")
     if has_id and has_result:
         return _construct(SuccessResponse, id=value["id"], result=value["result"])
     if has_id and has_error:
