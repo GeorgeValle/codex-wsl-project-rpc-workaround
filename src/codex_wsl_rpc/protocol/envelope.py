@@ -1,8 +1,8 @@
 """Pure value models for the pinned app-server wire envelopes.
 
-The pinned Rust structs use serde's default unknown-member behavior, so ordinary
-extra members are ignored while decoding.  ``jsonrpc`` is deliberately rejected:
-the pinned protocol explicitly neither sends nor expects that member.
+The pinned Rust structs use serde's default unknown-member behavior, so extra
+members, including ``jsonrpc``, are ignored while decoding.  The pinned protocol
+does not emit or require ``jsonrpc`` on the wire.
 """
 
 from __future__ import annotations
@@ -227,9 +227,6 @@ def parse_envelope(value: JsonValue) -> Envelope:
 
     if not isinstance(value, dict):
         raise ProtocolDecodeError(f"envelope: expected object; got {_category(value)}")
-    if "jsonrpc" in value:
-        raise ProtocolDecodeError("jsonrpc: member is not part of the pinned protocol")
-
     has_id = "id" in value
     has_method = "method" in value
     has_result = "result" in value

@@ -127,6 +127,7 @@ class SuccessResponseTests(unittest.TestCase):
             with self.subTest(model=model):
                 self.assertEqual(parse_envelope(model.to_wire()), model)
                 self.assertIn("result", model.to_wire())
+                self.assertNotIn("jsonrpc", model.to_wire())
 
     def test_result_is_snapshotted_at_construction_and_serialization(self) -> None:
         result = {"items": [[1]]}
@@ -148,6 +149,7 @@ class ErrorResponseTests(unittest.TestCase):
         for model, wire in cases:
             with self.subTest(wire=wire):
                 self.assertEqual(model.to_wire(), wire)
+                self.assertNotIn("jsonrpc", model.to_wire())
                 self.assertEqual(parse_envelope(wire), model)
 
     def test_null_error_data_normalizes_to_absent(self) -> None:
@@ -195,6 +197,7 @@ class NotificationTests(unittest.TestCase):
             with self.subTest(wire=wire):
                 self.assertEqual(model.to_wire(), wire)
                 self.assertNotIn("id", model.to_wire())
+                self.assertNotIn("jsonrpc", model.to_wire())
                 self.assertEqual(parse_envelope(wire), model)
 
     def test_null_params_normalizes_to_absent(self) -> None:
@@ -266,9 +269,22 @@ class ClassificationAndPolicyTests(unittest.TestCase):
             ErrorResponse(1, ProtocolError(-1, "x")),
         )
 
-    def test_jsonrpc_is_intentionally_rejected(self) -> None:
-        with self.assertRaisesRegex(ProtocolDecodeError, "not part of the pinned protocol"):
-            parse_envelope({"jsonrpc": "2.0", "id": 1, "method": "x"})
+    def test_jsonrpc_is_ignored_like_other_unknown_members(self) -> None:
+        request = parse_envelope(
+            {"jsonrpc": "2.0", "id": 1, "method": "x", "future": "value"}
+        )
+        self.assertEqual(request, Request(1, "x"))
+        self.assertNotIn("jsonrpc", request.to_wire())
+
+        cases = [
+            ({"jsonrpc": "2.0", "id": 1, "result": "ok"}, SuccessResponse(1, "ok")),
+            ({"jsonrpc": "2.0", "method": "ready"}, Notification("ready")),
+        ]
+        for wire, expected in cases:
+            with self.subTest(wire=wire):
+                model = parse_envelope(wire)
+                self.assertEqual(model, expected)
+                self.assertNotIn("jsonrpc", model.to_wire())
 
     def test_non_json_values_are_rejected(self) -> None:
         for result in ((1, 2), math.inf, {1: "value"}, {"nested": object()}):
