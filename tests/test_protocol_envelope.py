@@ -249,8 +249,6 @@ class ClassificationAndPolicyTests(unittest.TestCase):
     def test_ambiguous_unmatched_and_non_object_values_are_rejected(self) -> None:
         values = [
             {"id": 1, "result": None, "error": {"code": -1, "message": "x"}},
-            {"id": 1, "method": "x", "result": None},
-            {"method": "x", "error": {"code": -1, "message": "x"}},
             {"id": 1},
             [],
         ]
@@ -258,6 +256,31 @@ class ClassificationAndPolicyTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ProtocolDecodeError):
                     parse_envelope(value)
+
+    def test_requests_ignore_response_named_extra_members(self) -> None:
+        cases = [
+            {"id": 1, "method": "x", "result": {"ignored": True}},
+            {"id": 1, "method": "x", "error": {"code": -1, "message": "ignored"}},
+            {
+                "id": 1,
+                "method": "x",
+                "result": 1,
+                "error": {"code": -1, "message": "ignored"},
+            },
+        ]
+        for wire in cases:
+            with self.subTest(wire=wire):
+                model = parse_envelope(wire)
+                self.assertEqual(model, Request(1, "x"))
+                self.assertNotIn("result", model.to_wire())
+                self.assertNotIn("error", model.to_wire())
+
+    def test_notifications_ignore_response_named_extra_members(self) -> None:
+        model = parse_envelope(
+            {"method": "ready", "result": 1, "error": {"ignored": True}}
+        )
+        self.assertEqual(model, Notification("ready"))
+        self.assertEqual(model.to_wire(), {"method": "ready"})
 
     def test_pinned_serde_policy_ignores_unknown_members(self) -> None:
         self.assertEqual(

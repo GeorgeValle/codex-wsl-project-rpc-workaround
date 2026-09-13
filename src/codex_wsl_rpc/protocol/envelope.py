@@ -232,11 +232,6 @@ def parse_envelope(value: JsonValue) -> Envelope:
     has_result = "result" in value
     has_error = "error" in value
 
-    if has_result and has_error:
-        raise ProtocolDecodeError("envelope: result and error are mutually exclusive")
-    if has_method and (has_result or has_error):
-        raise ProtocolDecodeError("envelope: method contradicts response members")
-
     if has_id and has_method:
         return _construct(
             Request,
@@ -247,6 +242,8 @@ def parse_envelope(value: JsonValue) -> Envelope:
         )
     if has_method and not has_id:
         return _construct(Notification, method=value["method"], params=value.get("params"))
+    if has_result and has_error:
+        raise ProtocolDecodeError("envelope: result and error are mutually exclusive")
     if has_id and has_result:
         return _construct(SuccessResponse, id=value["id"], result=value["result"])
     if has_id and has_error:
