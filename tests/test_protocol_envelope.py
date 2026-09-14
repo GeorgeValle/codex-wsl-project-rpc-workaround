@@ -162,6 +162,30 @@ class SuccessResponseTests(unittest.TestCase):
         replaced = dataclasses.replace(model, id=2)
         self.assertEqual(replaced, SuccessResponse(2, {"items": [1]}))
 
+    def test_json_scalar_equality_preserves_wire_types_recursively(self) -> None:
+        unequal_pairs = [
+            (True, 1),
+            (False, 0),
+            (1, 1.0),
+            ({"value": True}, {"value": 1}),
+            ([True], [1]),
+        ]
+        for left, right in unequal_pairs:
+            with self.subTest(left=left, right=right):
+                self.assertNotEqual(SuccessResponse(1, left), SuccessResponse(1, right))
+        self.assertEqual(SuccessResponse(1, {"value": 1}), SuccessResponse(1, {"value": 1}))
+        self.assertNotEqual(Request(1, "x", True), Request(1, "x", 1))
+        self.assertNotEqual(Notification("x", [True]), Notification("x", [1]))
+        self.assertNotEqual(ProtocolError(-1, "x", True), ProtocolError(-1, "x", 1))
+
+    def test_json_scalar_types_survive_wire_round_trip(self) -> None:
+        for result in (True, 1, 1.0, {"value": True}, [1.0]):
+            with self.subTest(result=result):
+                wire_result = SuccessResponse(1, result).to_wire()["result"]
+                self.assertEqual(wire_result, result)
+                if not isinstance(result, (dict, list)):
+                    self.assertIs(type(wire_result), type(result))
+
 
 class ErrorResponseTests(unittest.TestCase):
     def test_exact_shapes_and_round_trip(self) -> None:
@@ -459,6 +483,40 @@ class ClassificationAndPolicyTests(unittest.TestCase):
         model = parse_envelope(source)
         source["result"]["items"].append(2)
         self.assertEqual(model.to_wire()["result"], {"items": [1]})
+
+
+class UnicodeStringTests(unittest.TestCase):
+    def test_surrogates_are_rejected_in_json_values_and_keys(self) -> None:
+        values = ["\ud800", "\udfff", "ok\ud800bad", {"items": [{"name": "\ud800"}]}, {"\udfff": "value"}]
+        for result in values:
+            with self.subTest(result=repr(result)):
+                with self.assertRaises(ProtocolModelError):
+                    SuccessResponse(1, result)
+
+    def test_surrogates_are_rejected_in_protocol_string_fields(self) -> None:
+        constructors = [
+            lambda: Request("\ud800", "x"),
+            lambda: Request(1, "x\udfff"),
+            lambda: ProtocolError(-1, "bad\ud800"),
+            lambda: W3cTraceContext("parent\ud800"),
+            lambda: W3cTraceContext("parent", "state\udfff"),
+        ]
+        for constructor in constructors:
+            with self.subTest(constructor=constructor):
+                with self.assertRaises(ProtocolModelError):
+                    constructor()
+
+    def test_decode_errors_remain_separate_from_model_errors(self) -> None:
+        for wire in ({"id": 1, "result": "\ud800"}, {"id": 1, "result": {"\udfff": 1}}):
+            with self.subTest(wire=repr(wire)):
+                with self.assertRaises(ProtocolDecodeError):
+                    parse_envelope(wire)
+
+    def test_valid_unicode_strings_are_accepted(self) -> None:
+        for value in ("á", "漢字", "🙂", "𝄞"):
+            with self.subTest(value=value):
+                model = SuccessResponse(1, {value: value})
+                self.assertEqual(model.to_wire()["result"], {value: value})
 
 
 if __name__ == "__main__":

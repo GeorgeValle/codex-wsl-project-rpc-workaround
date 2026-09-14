@@ -10,15 +10,27 @@ from __future__ import annotations
 from dataclasses import InitVar, dataclass, field
 import math
 from types import MappingProxyType
-from typing import Callable, TypeAlias
+from typing import Callable, Literal, TypeAlias
 
 from .errors import ProtocolDecodeError, ProtocolModelError
 
 
 JsonScalar: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
+
+
+@dataclass(frozen=True, slots=True)
+class _FrozenScalar:
+    """A JSON scalar whose equality preserves its wire type."""
+
+    kind: Literal["null", "bool", "int", "float", "string"]
+    value: JsonScalar
+
+
 FrozenJsonValue: TypeAlias = (
-    JsonScalar | tuple["FrozenJsonValue", ...] | MappingProxyType[str, "FrozenJsonValue"]
+    _FrozenScalar
+    | tuple["FrozenJsonValue", ...]
+    | MappingProxyType[str, "FrozenJsonValue"]
 )
 RequestId: TypeAlias = str | int
 
@@ -40,6 +52,7 @@ def _validate_i64(value: object, path: str) -> None:
 
 def _validate_request_id(value: object, path: str = "id") -> None:
     if isinstance(value, str):
+        _validate_string(value, path)
         return
     _validate_i64(value, path)
 
@@ -47,6 +60,8 @@ def _validate_request_id(value: object, path: str = "id") -> None:
 def _validate_string(value: object, path: str) -> None:
     if not isinstance(value, str):
         raise ProtocolModelError(f"{path}: expected string; got {_category(value)}")
+    if any("\ud800" <= character <= "\udfff" for character in value):
+        raise ProtocolModelError(f"{path}: string contains a Unicode surrogate")
 
 
 def _freeze_json(value: object, path: str) -> FrozenJsonValue:
@@ -58,15 +73,20 @@ def _freeze_json(value: object, path: str) -> FrozenJsonValue:
     larger integers instead of silently changing their value or type to float.
     """
 
-    if value is None or isinstance(value, (bool, str)):
-        return value
+    if value is None:
+        return _FrozenScalar("null", value)
+    if isinstance(value, bool):
+        return _FrozenScalar("bool", value)
+    if isinstance(value, str):
+        _validate_string(value, path)
+        return _FrozenScalar("string", value)
     if isinstance(value, int):
         if not _I64_MIN <= value <= _U64_MAX:
             raise ProtocolModelError(f"{path}: JSON integer is out of range")
-        return value
+        return _FrozenScalar("int", value)
     if isinstance(value, float):
         if math.isfinite(value):
-            return value
+            return _FrozenScalar("float", value)
         raise ProtocolModelError(f"{path}: expected a finite JSON number")
     if isinstance(value, list):
         return tuple(
@@ -78,6 +98,7 @@ def _freeze_json(value: object, path: str) -> FrozenJsonValue:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ProtocolModelError(f"{path}: expected object keys to be strings")
+            _validate_string(key, f"{path} key")
             frozen[key] = _freeze_json(item, f"{path}.{key}")
         return MappingProxyType(frozen)
     raise ProtocolModelError(f"{path}: expected a JSON-compatible value; got {_category(value)}")
@@ -86,6 +107,8 @@ def _freeze_json(value: object, path: str) -> FrozenJsonValue:
 def _thaw_json(value: FrozenJsonValue) -> JsonValue:
     """Return a fresh ordinary JSON-compatible representation of a frozen value."""
 
+    if isinstance(value, _FrozenScalar):
+        return value.value
     if isinstance(value, tuple):
         return [_thaw_json(item) for item in value]
     if isinstance(value, MappingProxyType):
