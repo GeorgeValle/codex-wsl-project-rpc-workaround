@@ -124,11 +124,13 @@ All remain `NOT_ESTABLISHED`:
 Every future experiment must report independently:
 
 1. **Did the RPC succeed?**
-2. **Does `project/list` return/persist the Project?**
+2. **Does a later `project/list` return the Project, providing evidence that
+   the prior write persisted in the app-server store?**
 3. **Does Codex Desktop show or recognize the Project?**
 
 A response, notification, or persisted record does not answer all three. This
-distinction governs future PR8 and separately authorized mutation acceptance.
+distinction governs Subdivision 2.3 and separately authorized mutation
+acceptance.
 
 ## Path-representation findings
 
@@ -182,7 +184,7 @@ exercise `RPC-003`. It reinforces `SAFE-001`, `SAFE-004`, `PATH-001`,
 `SECRET-001`, `SECRET-002`, `TEST-003`, `MUT-001`, `MUT-002`, `MUT-003`, and
 the still-unsatisfied `GATE-001`. It adds no capability or gate advancement.
 
-## Future PR7 criteria
+## Delivery 3 / Subdivision 2.2 mock criteria
 
 Future Delivery 3 remains `MOCK_ONLY` and separately human-approved. Keep
 independent: wire/schema validation; connection initialization;
@@ -193,9 +195,9 @@ It must not silently rewrite paths during decoding, equate a fake store with the
 Desktop sidebar, invoke a real app-server, or access real state. This evidence
 refines responsibility boundaries without expanding authorization.
 
-## Future PR8 criteria
+## Subdivision 2.3 read-only real `project/list` integration criteria
 
-Future PR8 is the real read-only `project/list` checkpoint. Ask separately:
+Subdivision 2.3 is the real read-only `project/list` checkpoint. Ask separately:
 
 - Did initialize succeed?
 - Was `experimentalApi` requested/accepted?
@@ -206,14 +208,15 @@ Future PR8 is the real read-only `project/list` checkpoint. Ask separately:
 - If not, could store/process/synchronization divergence explain it?
 - Are returned Projects visible in Desktop?
 
-PR8 remains `READ_ONLY`; do not create, import, update, delete, or move merely
-to prove equivalence.
+Subdivision 2.3 remains `READ_ONLY`; do not create, import, update, delete, or
+move merely to prove equivalence.
 
 ## Mutation-stage implications
 
-Separately approved mutation work must measure: **A.** RPC success; **B.** later
-`project/list` persistence; **C.** Desktop recognition. Authorization is exact
-method-specific: `project/create` authorization does not authorize
+Separately approved mutation work must measure: **A.** RPC success; **B.**
+confirmation via a later `project/list` that the prior write persisted; **C.**
+Desktop recognition. Authorization is exact method-specific: `project/create`
+authorization does not authorize
 `project/update`, `project/import`, `project/delete`, or `project/move`. Path
 adaptation needs separate review. Delete and move remain outside the roadmap.
 
