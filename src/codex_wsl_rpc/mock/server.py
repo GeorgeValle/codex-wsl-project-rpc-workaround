@@ -52,10 +52,10 @@ def _parse_canonical_i64(value_text: str) -> int:
 
 
 def _valid_header_value(value: str) -> bool:
-    """Match HeaderValue::from_str for the ASCII client names used by the mock."""
+    """Match HeaderValue::from_str by validating the UTF-8 header bytes."""
     return all(
-        character == "\t" or " " <= character <= "~"
-        for character in value
+        byte == 0x09 or 0x20 <= byte <= 0x7E or 0x80 <= byte <= 0xFF
+        for byte in value.encode("utf-8")
     )
 
 

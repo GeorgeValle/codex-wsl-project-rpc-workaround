@@ -23,7 +23,7 @@ class ServerTests(unittest.TestCase):
         duplicate=initialize(server,2); self.assertEqual((duplicate.error.code,duplicate.error.message),(-32600,"Already initialized"))
 
     def test_valid_header_client_names_initialize(self):
-        for name in ("tests-client", "tests\tclient"):
+        for name in ("tests-client", "tests\tclient", "tests-\N{SNOWMAN}", "caf\N{LATIN SMALL LETTER E WITH ACUTE}"):
             with self.subTest(name=repr(name)):
                 server=FakeAppServer()
                 self.assertIsInstance(initialize(server,name=name),SuccessResponse)
@@ -33,7 +33,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(bad.error.code,-32602); self.assertIsInstance(initialize(server,2),SuccessResponse)
 
     def test_invalid_header_client_names_do_not_initialize(self):
-        for name in ("line\nfeed","carriage\rreturn","control\x01value","control\x1fvalue","delete\x7fvalue","non-ascii-\N{SNOWMAN}"):
+        for name in ("line\nfeed","carriage\rreturn","control\x01value","control\x1fvalue","delete\x7fvalue"):
             with self.subTest(name=repr(name)):
                 server=FakeAppServer()
                 invalid=initialize(server,capabilities=True,name=name)
@@ -43,7 +43,7 @@ class ServerTests(unittest.TestCase):
                 )
                 denied=server.handle(Request(2,"project/list",{}))
                 self.assertEqual((denied.error.code,denied.error.message),(-32600,"Not initialized"))
-                self.assertIsInstance(initialize(server,3,capabilities=True),SuccessResponse)
+                self.assertIsInstance(initialize(server,3,capabilities=True,name="tests-\N{SNOWMAN}"),SuccessResponse)
                 self.assertIsInstance(server.handle(Request(4,"project/list",{})),SuccessResponse)
                 duplicate=initialize(server,5)
                 self.assertEqual((duplicate.error.code,duplicate.error.message),(-32600,"Already initialized"))
