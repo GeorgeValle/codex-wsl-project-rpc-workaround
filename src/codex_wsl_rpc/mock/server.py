@@ -41,6 +41,21 @@ def _canonical_uuid(value: str) -> bool:
         return False
 
 
+def _parse_canonical_i64(value_text: str) -> int:
+    try:
+        value = int(value_text)
+    except ValueError as error:
+        raise ProtocolDecodeError(_INVALID_CURSOR) from error
+    if str(value) != value_text or not _I64_MIN <= value <= _I64_MAX:
+        raise ProtocolDecodeError(_INVALID_CURSOR)
+    return value
+
+
+def _valid_header_value(value: str) -> bool:
+    """Match HeaderValue::from_str for the ASCII client names used by the mock."""
+    return all(" " <= character <= "~" for character in value)
+
+
 def _effective_order(params: ProjectListParams) -> tuple[ProjectSortKey, SortDirection]:
     if params.sort_key is None:
         if params.sort_direction is not None:
@@ -73,14 +88,7 @@ def _parse_cursor(cursor: str, key: ProjectSortKey, direction: SortDirection) ->
     if value_text == "null" and key is ProjectSortKey.RECENCY_AT:
         value = None
     else:
-        try:
-            value = int(value_text)
-        except ValueError as error:
-            raise ProtocolDecodeError(_INVALID_CURSOR) from error
-        if str(value) != value_text or (
-            key is ProjectSortKey.POSITION and not _I64_MIN <= value <= _I64_MAX
-        ):
-            raise ProtocolDecodeError(_INVALID_CURSOR)
+        value = _parse_canonical_i64(value_text)
     if not _canonical_uuid(project_id):
         raise ProtocolDecodeError(_INVALID_CURSOR)
     return value, project_id
@@ -138,6 +146,12 @@ class FakeAppServer:
         if self._lifecycle is _LifecycleState.INITIALIZED:
             return self._error_response(request, -32600, "Already initialized")
         params = InitializeParams.from_wire(request.params)
+        if not _valid_header_value(params.client_info.name):
+            return self._error_response(
+                request, -32600,
+                f"Invalid clientInfo.name: '{params.client_info.name}'. "
+                "Must be a valid HTTP header value.",
+            )
         self._experimental_enabled = bool(
             params.capabilities is not None and params.capabilities.experimental_api
         )

@@ -96,6 +96,37 @@ class ProjectListTests(unittest.TestCase):
                 response=listed([project(1)],ProjectListParams(cursor=f"{value}|{IDS[0]}"))
                 self.assertEqual(response.error.code,-32602)
 
+    def test_recency_cursor_signed_i64_boundaries_and_spelling(self):
+        base=dict(sort_key=ProjectSortKey.RECENCY_AT,sort_direction=SortDirection.ASC)
+        for value in (-(2**63),2**63-1):
+            with self.subTest(accepted=value):
+                cursor=f"v1|recencyAt|asc|{value}|{IDS[0]}"
+                self.assertIsInstance(
+                    listed([project(1,recency=0)],ProjectListParams(cursor=cursor,**base)),
+                    SuccessResponse,
+                )
+
+        for value in (-(2**63)-1,2**63,"+1","01","-0"):
+            with self.subTest(rejected=value):
+                cursor=f"v1|recencyAt|asc|{value}|{IDS[0]}"
+                response=listed([project(1,recency=0)],ProjectListParams(cursor=cursor,**base))
+                self.assertEqual(response.error.code,-32602)
+
+    def test_negative_recency_cursor_round_trips_through_pagination(self):
+        fixtures=[project(1,recency=-3),project(2,recency=-2),project(3,recency=-1)]
+        base=ProjectListParams(
+            limit=2,sort_key=ProjectSortKey.RECENCY_AT,
+            sort_direction=SortDirection.ASC,
+        )
+        first=listed(fixtures,base)
+        self.assertEqual(ids(first),IDS[:2])
+        self.assertEqual(first.result["nextCursor"],f"v1|recencyAt|asc|-2|{IDS[1]}")
+        second=listed(fixtures,ProjectListParams(
+            cursor=first.result["nextCursor"],limit=2,
+            sort_key=base.sort_key,sort_direction=base.sort_direction,
+        ))
+        self.assertEqual(ids(second),[IDS[2]])
+
     def test_pagination_crosses_to_and_anchors_in_nulls(self):
         fixtures=[project(1,recency=1),project(2,recency=2),project(3),project(4),project(5)]
         base=ProjectListParams(limit=3,sort_key=ProjectSortKey.RECENCY_AT,sort_direction=SortDirection.ASC)
