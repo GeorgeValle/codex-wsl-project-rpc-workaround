@@ -13,6 +13,8 @@ from .envelope import (
     parse_envelope,
 )
 from .errors import ProtocolDecodeError, ProtocolModelError
+from .initialize import ClientInfo, InitializeCapabilities, InitializeParams, InitializeResponse
+from .projects import Project, ProjectListParams, ProjectListResponse, ProjectRoot, ProjectSortKey, SortDirection
 
 __all__ = [
     "Envelope",
@@ -27,4 +29,6 @@ __all__ = [
     "SuccessResponse",
     "W3cTraceContext",
     "parse_envelope",
+    "ClientInfo", "InitializeCapabilities", "InitializeParams", "InitializeResponse",
+    "Project", "ProjectListParams", "ProjectListResponse", "ProjectRoot", "ProjectSortKey", "SortDirection",
 ]
