@@ -363,6 +363,60 @@ misleading.
 not ready; real integration is not authorized. Mocks must not silently encode
 those unknowns, unverified path conversion, or method exposure in other builds.
 
+## Delivery 3 mock implementation
+
+The `codex_wsl_rpc.mock` package is a synthetic, synchronous development aid.
+Its JSON-line `str` boundary and immutable fixture store are local mock choices;
+they are not a real stdio stream, the Codex Project store, Desktop state, or a
+model of Desktop synchronization. The fake store is always available (and may
+be empty), so the pinned upstream unavailable-store branch is intentionally
+unreachable. Trusted-development static regression guards help prevent unsafe
+imports and operations, but are not OS-level security containment.
+
+The handler behavior is compatible specifically with pinned revision
+`7efa9d96fb34c3cafe108a3c870bfc33e5635772`: position ordering uses position
+then ID; recency ordering always places non-null recency before null recency and
+uses ID as the tie-breaker; direction applies to values and IDs. Limits default
+to 25 and clamp to 1–100. Stateless keyset cursors use legacy
+`<position>|<uuid>` for ascending position and
+`v1|<key>|<direction>|<value>|<uuid>` otherwise. Cursor parsing enforces the
+128-character limit, exact components, canonical integers, matching order, and
+canonical lowercase hyphenated UUIDs.
+
+`Project` remains a wire schema and intentionally accepts broader ID strings.
+Only the fake store requires canonical UUID fixture IDs so cursor generation
+cannot fail during pagination; that is a mock store/handler constraint, not a
+schema change. Fixture roots preserve POSIX, Windows drive, `wsl.localhost`, and
+`wsl$` spellings and ordering exactly. Paths are data: the mock performs no
+translation, normalization, canonicalization, or existence check.
+
+The pinned `message_processor.rs` `process_notification` and
+`process_client_notification` symbols only log client notifications. Therefore
+an `initialized` notification before or after initialization is accepted with
+no response and no state change; it cannot initialize the connection or enable
+`experimentalApi`. The pinned `error_code.rs` establishes generic
+method-not-found code `-32601`, but no exact generic message at this mock's
+dispatch boundary was established. The deterministic text `Method not found`
+is consequently **mock-local**, not claimed as upstream-exact.
+
+### GATE-001 technical validation matrix
+
+| Condition | Evidence |
+|---|---|
+| packaging established | Packaging validator installs and imports the mock package from its copied-source environment. |
+| deterministic test execution established | The complete standard-library unittest suite passes with fixed fixtures and sequential IDs. |
+| safety rules tested | Mock safety tests and static audits pass as trusted-development regression guards. |
+| no real Codex state needed | Runtime contains no Desktop, `~/.codex`, or SQLite access. |
+| fake transport + schemas pass | Transport, server, client, and Project/list tests pass. |
+| no Codex needed | Runtime contains no process launch or executable discovery. |
+| no secrets/user state | Tests use synthetic placeholder fixtures only. |
+| no network | Runtime and tests contain no network operation. |
+
+**Technical GATE-001 status: `SATISFIED`.** This evidence makes the
+`MOCK_ONLY` transition technically eligible. Acceptance and merge remain
+human-gated and require clean Code Review, clean Security Review, and final
+human approval; those process controls are not intrinsic GATE-001 rows.
+
 ## Open questions and explicit non-goals
 
 Open integration questions are the Desktop-owned endpoint/process, selected
