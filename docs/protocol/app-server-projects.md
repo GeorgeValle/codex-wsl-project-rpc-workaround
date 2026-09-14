@@ -363,6 +363,62 @@ misleading.
 not ready; real integration is not authorized. Mocks must not silently encode
 those unknowns, unverified path conversion, or method exposure in other builds.
 
+## Delivery 3 mock implementation
+
+The `codex_wsl_rpc.mock` package is a synthetic, synchronous development aid.
+Its JSON-line `str` boundary and immutable fixture store are local mock choices;
+they are not a real stdio stream, the Codex Project store, Desktop state, or a
+model of Desktop synchronization. The fake store is always available (and may
+be empty), so the pinned upstream unavailable-store branch is intentionally
+unreachable. Trusted-development static regression guards help prevent unsafe
+imports and operations, but are not OS-level security containment.
+
+The handler behavior is compatible specifically with pinned revision
+`7efa9d96fb34c3cafe108a3c870bfc33e5635772`: position ordering uses position
+then ID; recency ordering always places non-null recency before null recency and
+uses ID as the tie-breaker; direction applies to values and IDs. Limits default
+to 25 and clamp to 1–100. Stateless keyset cursors use legacy
+`<position>|<uuid>` for ascending position and
+`v1|<key>|<direction>|<value>|<uuid>` otherwise. Cursor parsing enforces the
+128-character limit, exact components, canonical integers, matching order, and
+canonical lowercase hyphenated UUIDs. Position anchors accept the complete
+signed-64-bit domain, including negative positions, and reject values outside
+that domain.
+
+`Project` remains a wire schema and intentionally accepts broader ID strings.
+Only the fake store requires canonical UUID fixture IDs so cursor generation
+cannot fail during pagination; that is a mock store/handler constraint, not a
+schema change. Fixture roots preserve POSIX, Windows drive, `wsl.localhost`, and
+`wsl$` spellings and ordering exactly. Paths are data: the mock performs no
+translation, normalization, canonicalization, or existence check.
+
+The pinned `message_processor.rs` `process_notification` and
+`process_client_notification` symbols only log client notifications. Therefore
+an `initialized` notification before or after initialization is accepted with
+no response and no state change; it cannot initialize the connection or enable
+`experimentalApi`. The pinned `error_code.rs` establishes generic
+method-not-found code `-32601`, but no exact generic message at this mock's
+dispatch boundary was established. The deterministic text `Method not found`
+is consequently **mock-local**, not claimed as upstream-exact.
+
+### GATE-001 technical validation matrix
+
+| Condition | Evidence |
+|---|---|
+| packaging established | Packaging validator explicitly imports both `codex_wsl_rpc` and `codex_wsl_rpc.mock` from its installed copied-source environment and verifies both module origins. |
+| deterministic test execution established | The complete standard-library unittest suite passes with fixed fixtures and sequential IDs. |
+| safety rules tested | Mock safety tests and static audits pass as trusted-development regression guards. |
+| no real Codex state needed | Runtime contains no Desktop, `~/.codex`, or SQLite access. |
+| fake transport + schemas pass | Transport, server, client, and Project/list tests pass. |
+| no Codex needed | Runtime contains no process launch or executable discovery. |
+| no secrets/user state | Tests use synthetic placeholder fixtures only. |
+| no network | Runtime and tests contain no network operation. |
+
+**Technical GATE-001 status: `SATISFIED`.** This evidence makes the
+`MOCK_ONLY` transition technically eligible. Acceptance and merge remain
+human-gated and require clean Code Review, clean Security Review, and final
+human approval; those process controls are not intrinsic GATE-001 rows.
+
 ## Open questions and explicit non-goals
 
 Open integration questions are the Desktop-owned endpoint/process, selected
@@ -370,10 +426,21 @@ state root, installed-build mapping, startup writes, and cross-platform path
 round-tripping. They constrain Subdivision 2.3 but do not block completion of
 this proportionate public research.
 
-Non-goals are executable protocol models, transports, fixtures, process
-discovery/launch/attachment, schema generation, RPC invocation, local-state or
-Desktop configuration access, and all mutation. `project/import`,
-`project/move`, and `project/delete` are excluded roadmap operations.
+Executable mock models, transports, and fixtures were deferred during protocol
+research but are now delivered by Delivery 3. That delivery is limited to the
+`codex_wsl_rpc.mock` client/test-support package, its synthetic in-memory
+JSON-line transport and fixture store, the fake app-server lifecycle, and
+deterministic mock `project/list` behavior.
+
+Real integration remains an explicit non-goal: no real Codex/app-server process
+startup, real stdio process transport, Unix socket transport, WebSocket/TCP
+transport, attachment to a Desktop-owned app-server, real RPC execution, real
+`project/list`, or real Project-store access is delivered. Access to
+`~/.codex`, SQLite, Desktop configuration or state, and Windows/WSL path
+adaptation also remains deferred, as do Desktop sidebar/store equivalence
+claims and Subdivision 2.3 integration. Mutation authorization remains `NONE`:
+Project mutation and `project/create`, `project/update`, `project/import`,
+`project/move`, and `project/delete` are explicit non-goals.
 
 ## Sources and provenance ledger
 

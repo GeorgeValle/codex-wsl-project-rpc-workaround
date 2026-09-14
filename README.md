@@ -1,15 +1,18 @@
 # Codex WSL Project RPC Workaround
 
 > **Experimental and unofficial.** This project is not affiliated with or
-> endorsed by OpenAI. The current foundation contains **no functional
-> Codex workaround** and performs no Codex RPC operations.
+> endorsed by OpenAI. The repository has a deterministic **mock-only** protocol
+> capability, but contains **no real Codex workaround** and performs no real
+> Codex RPC operations.
 
 ## Project purpose
 
 This repository explores a possible workaround for a Codex Desktop regression
 observed by a Windows + WSL user. Its long-term goal is safe, auditable
 management of Codex Desktop Projects while the WSL backend remains enabled.
-This repository currently establishes constraints before capabilities.
+The mock transport, server, and client exercise synthetic Project fixtures
+without accessing Desktop or user state. No real integration or mutation
+capability exists.
 
 ## Incident that motivated the project
 
@@ -74,8 +77,8 @@ The objective is to manage Projects without relying on the broken Desktop
 Project registration path.
 
 Potential future operations are read-only Project listing, controlled Project
-creation, and controlled Project update. **None of these features exists at the
-current `NON_FUNCTIONAL` capability level.**
+creation, and controlled Project update. The current `MOCK_ONLY` capability
+implements none of those operations against a real Codex installation.
 
 ## Staged progression
 
@@ -123,5 +126,6 @@ and an inert import in a controlled child process. Editable installation is a
 separate opt-in check run with `python3 -B tests/validate_packaging.py`. It uses
 one fresh copied-source workspace under `.cache`, build isolation, and only the
 externally provisioned, pinned and hash-verified `setuptools 84.0.0` wheel. It
-does not build in or clean the original checkout. No functional Codex workaround
-exists yet.
+does not build in or clean the original checkout. Mock tests require no Codex,
+network, secrets, user state, or Desktop configuration. No functional real
+Codex workaround exists yet.

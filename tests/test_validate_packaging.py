@@ -520,6 +520,7 @@ class OrchestrationTests(FixtureMixin, unittest.TestCase):
                     report = Path(kwargs["env"]["FOUNDATION_REPORT"])
                     report.write_text(json.dumps({
                         "origin": str((workspace / "project/src/codex_wsl_rpc/__init__.py").resolve()),
+                        "mock_origin": str((workspace / "project/src/codex_wsl_rpc/mock/__init__.py").resolve()),
                         "invoked": [],
                         "filesystem_io": [],
                         "metadata": {"name": "codex-wsl-rpc", "version": "0.0.0",
@@ -704,6 +705,29 @@ class ImportInertnessTests(FixtureMixin, unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(observation["denied_audit_events"], [])
+
+    def test_installed_probe_fails_when_mock_subpackage_is_unavailable(self):
+        with self.sandbox() as temporary:
+            area = Path(temporary)
+            package_root = area / "source"
+            package = package_root / "codex_wsl_rpc"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text('__version__ = "0.0.0"\n', encoding="utf-8")
+            environment = {
+                "FOUNDATION_ALLOWED_READ_ROOTS": json.dumps([str(package_root)]),
+                "FOUNDATION_REPORT": str(area / "report.json"),
+                "FOUNDATION_SRC": str(package_root),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+            result = subprocess.run(
+                [sys.executable, "-S", "-B", "-c", guarded_import_probe(
+                    include_mock_subpackage=True
+                )],
+                cwd=area, env=environment, capture_output=True, text=True,
+                check=False, shell=False, timeout=IMPORT_PROBE_TIMEOUT_SECONDS,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("codex_wsl_rpc.mock", result.stderr)
 
     def test_guarded_package_probe_rejects_thread_start(self):
         cases = {
