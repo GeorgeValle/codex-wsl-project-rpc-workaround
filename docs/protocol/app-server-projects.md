@@ -426,10 +426,21 @@ state root, installed-build mapping, startup writes, and cross-platform path
 round-tripping. They constrain Subdivision 2.3 but do not block completion of
 this proportionate public research.
 
-Non-goals are executable protocol models, transports, fixtures, process
-discovery/launch/attachment, schema generation, RPC invocation, local-state or
-Desktop configuration access, and all mutation. `project/import`,
-`project/move`, and `project/delete` are excluded roadmap operations.
+Executable mock models, transports, and fixtures were deferred during protocol
+research but are now delivered by Delivery 3. That delivery is limited to the
+`codex_wsl_rpc.mock` client/test-support package, its synthetic in-memory
+JSON-line transport and fixture store, the fake app-server lifecycle, and
+deterministic mock `project/list` behavior.
+
+Real integration remains an explicit non-goal: no real Codex/app-server process
+startup, real stdio process transport, Unix socket transport, WebSocket/TCP
+transport, attachment to a Desktop-owned app-server, real RPC execution, real
+`project/list`, or real Project-store access is delivered. Access to
+`~/.codex`, SQLite, Desktop configuration or state, and Windows/WSL path
+adaptation also remains deferred, as do Desktop sidebar/store equivalence
+claims and Subdivision 2.3 integration. Mutation authorization remains `NONE`:
+Project mutation and `project/create`, `project/update`, `project/import`,
+`project/move`, and `project/delete` are explicit non-goals.
 
 ## Sources and provenance ledger
 
