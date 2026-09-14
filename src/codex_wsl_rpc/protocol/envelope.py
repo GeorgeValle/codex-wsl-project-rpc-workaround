@@ -8,46 +8,11 @@ does not emit or require ``jsonrpc`` on the wire.
 from __future__ import annotations
 
 from dataclasses import InitVar, dataclass, field
-import math
-from types import MappingProxyType
-from typing import Callable, Literal, TypeAlias
+from typing import Callable, TypeAlias
 
 from .errors import ProtocolDecodeError, ProtocolModelError
-
-
-JsonScalar: TypeAlias = None | bool | int | float | str
-JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
-
-
-@dataclass(frozen=True, slots=True)
-class _FrozenScalar:
-    """A JSON scalar whose equality preserves its wire type."""
-
-    kind: Literal["null", "bool", "int", "float", "string"]
-    value: JsonScalar
-
-
-FrozenJsonValue: TypeAlias = (
-    _FrozenScalar
-    | tuple["FrozenJsonValue", ...]
-    | MappingProxyType[str, "FrozenJsonValue"]
-)
+from ._values import FrozenJsonValue, JsonValue, _category, _freeze_json, _thaw_json, _validate_i64, _validate_string
 RequestId: TypeAlias = str | int
-
-_I64_MIN = -(2**63)
-_I64_MAX = 2**63 - 1
-_U64_MAX = 2**64 - 1
-
-
-def _category(value: object) -> str:
-    return type(value).__name__
-
-
-def _validate_i64(value: object, path: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ProtocolModelError(f"{path}: expected a signed 64-bit integer; got {_category(value)}")
-    if not _I64_MIN <= value <= _I64_MAX:
-        raise ProtocolModelError(f"{path}: signed 64-bit integer is out of range")
 
 
 def _validate_request_id(value: object, path: str = "id") -> None:
@@ -55,65 +20,6 @@ def _validate_request_id(value: object, path: str = "id") -> None:
         _validate_string(value, path)
         return
     _validate_i64(value, path)
-
-
-def _validate_string(value: object, path: str) -> None:
-    if not isinstance(value, str):
-        raise ProtocolModelError(f"{path}: expected string; got {_category(value)}")
-    if any("\ud800" <= character <= "\udfff" for character in value):
-        raise ProtocolModelError(f"{path}: string contains a Unicode surrogate")
-
-
-def _freeze_json(value: object, path: str) -> FrozenJsonValue:
-    """Validate and recursively freeze one value in the supported JSON domain.
-
-    Normal ``serde_json::Number`` stores integers directly as ``i64`` or
-    ``u64`` and otherwise uses a finite ``f64``.  LOCAL MOCK POLICY: Python
-    integers must fit the direct integer storage range; this codec rejects
-    larger integers instead of silently changing their value or type to float.
-    """
-
-    if value is None:
-        return _FrozenScalar("null", value)
-    if isinstance(value, bool):
-        return _FrozenScalar("bool", value)
-    if isinstance(value, str):
-        _validate_string(value, path)
-        return _FrozenScalar("string", value)
-    if isinstance(value, int):
-        if not _I64_MIN <= value <= _U64_MAX:
-            raise ProtocolModelError(f"{path}: JSON integer is out of range")
-        return _FrozenScalar("int", value)
-    if isinstance(value, float):
-        if math.isfinite(value):
-            return _FrozenScalar("float", value)
-        raise ProtocolModelError(f"{path}: expected a finite JSON number")
-    if isinstance(value, list):
-        return tuple(
-            _freeze_json(item, f"{path}[{index}]")
-            for index, item in enumerate(value)
-        )
-    if isinstance(value, dict):
-        frozen: dict[str, FrozenJsonValue] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise ProtocolModelError(f"{path}: expected object keys to be strings")
-            _validate_string(key, f"{path} key")
-            frozen[key] = _freeze_json(item, f"{path}.{key}")
-        return MappingProxyType(frozen)
-    raise ProtocolModelError(f"{path}: expected a JSON-compatible value; got {_category(value)}")
-
-
-def _thaw_json(value: FrozenJsonValue) -> JsonValue:
-    """Return a fresh ordinary JSON-compatible representation of a frozen value."""
-
-    if isinstance(value, _FrozenScalar):
-        return value.value
-    if isinstance(value, tuple):
-        return [_thaw_json(item) for item in value]
-    if isinstance(value, MappingProxyType):
-        return {key: _thaw_json(item) for key, item in value.items()}
-    return value
 
 
 @dataclass(frozen=True, slots=True)

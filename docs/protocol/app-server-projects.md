@@ -12,6 +12,33 @@ Capability remains `NON_FUNCTIONAL`; mutation authorization remains `NONE`.
 `project/create` and `project/update` are recorded only as future contract
 boundaries. No method in this document was invoked during research.
 
+## Delivery 2 executable schema policy
+
+Delivery 2 adds pure value codecs only; it does not add a transport, dispatch,
+state machine, or real integration. Schema decoding validates the complete JSON
+tree, ignores valid unknown members, and keeps handler normalization out of the
+models.
+
+Initialization omission rules follow the pinned serde shapes: `ClientInfo.title`
+encodes as a string or explicit null; absent or null
+`InitializeParams.capabilities` is omitted. `experimentalApi` and
+`requestAttestation` always encode a boolean, while false
+`mcpServerOpenaiFormElicitation` and absent `extensions` are omitted.
+`optOutNotificationMethods` encodes an explicit null when absent.
+
+Project/list schema options (`cursor`, `limit`, `sortKey`, and `sortDirection`)
+all encode explicit null when absent. `Project.recencyAt` and
+`ProjectListResponse.nextCursor` likewise encode explicit null. Limits retain
+their schema values; defaulting, clamping, sorting, pagination, and cursor
+semantics are handler concerns deferred beyond this delivery.
+
+For `ProjectRoot.path`, this is a limited **LOCAL MODEL POLICY for Delivery 2**:
+the codec accepts clearly absolute POSIX, Windows-drive, and UNC wire spellings
+without filesystem access or normalization. Exact cross-platform
+`AbsolutePathBuf` behavior remains **NOT_ESTABLISHED**. Timestamp units for
+`createdAt` and `updatedAt` also remain **NOT_ESTABLISHED**; `recencyAt` is Unix
+seconds as established by the pinned source.
+
 ## Selected upstream reference and method
 
 - **Repository:** <https://github.com/openai/codex>
