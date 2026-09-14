@@ -269,7 +269,10 @@ def validate_installation(workspace: Path, project: Path, venv_python: Path,
     ])
     run_checked(
         runner, [str(venv_python), "-I", "-B", "-c",
-                 guarded_import_probe(include_distribution_metadata=True)],
+                 guarded_import_probe(
+                     include_distribution_metadata=True,
+                     include_mock_subpackage=True,
+                 )],
         cwd=workspace / "run", environment=probe_environment,
         timeout=PROBE_TIMEOUT_SECONDS,
     )
@@ -277,6 +280,11 @@ def validate_installation(workspace: Path, project: Path, venv_python: Path,
     expected_origin = (project / "src/codex_wsl_rpc/__init__.py").resolve()
     if Path(observation["origin"]) != expected_origin:
         raise ValidationError(f"Installed package origin mismatch: {observation['origin']}")
+    expected_mock_origin = (project / "src/codex_wsl_rpc/mock/__init__.py").resolve()
+    if Path(observation["mock_origin"]) != expected_mock_origin:
+        raise ValidationError(
+            f"Installed mock package origin mismatch: {observation['mock_origin']}"
+        )
     expected = {
         "name": "codex-wsl-rpc", "version": "0.0.0",
         "requires_python": ">=3.11", "requires_dist": [], "entry_points": [],

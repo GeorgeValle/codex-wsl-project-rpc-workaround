@@ -13,6 +13,8 @@ from codex_wsl_rpc.protocol import (
 )
 
 _INVALID_CURSOR = "invalid project cursor: malformed or mismatched sort anchor"
+_I64_MIN = -(2**63)
+_I64_MAX = 2**63 - 1
 
 
 class _LifecycleState(Enum):
@@ -75,7 +77,9 @@ def _parse_cursor(cursor: str, key: ProjectSortKey, direction: SortDirection) ->
             value = int(value_text)
         except ValueError as error:
             raise ProtocolDecodeError(_INVALID_CURSOR) from error
-        if str(value) != value_text or (key is ProjectSortKey.POSITION and value < 0):
+        if str(value) != value_text or (
+            key is ProjectSortKey.POSITION and not _I64_MIN <= value <= _I64_MAX
+        ):
             raise ProtocolDecodeError(_INVALID_CURSOR)
     if not _canonical_uuid(project_id):
         raise ProtocolDecodeError(_INVALID_CURSOR)

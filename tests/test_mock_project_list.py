@@ -65,6 +65,37 @@ class ProjectListTests(unittest.TestCase):
         rec=ProjectListParams(limit=4,sort_key=ProjectSortKey.RECENCY_AT,sort_direction=SortDirection.ASC)
         self.assertEqual(listed(fixtures,rec).result["nextCursor"],f"v1|recencyAt|asc|null|{IDS[3]}")
 
+    def test_negative_position_cursors_round_trip_and_paginate(self):
+        fixtures=[project(1,position=-8),project(2,position=-7),project(3,position=-6),project(4,position=-5)]
+        first=listed(fixtures,ProjectListParams(limit=2))
+        self.assertEqual(ids(first),IDS[:2])
+        self.assertEqual(first.result["nextCursor"],f"-7|{IDS[1]}")
+        second=listed(fixtures,ProjectListParams(limit=2,cursor=first.result["nextCursor"]))
+        self.assertEqual(ids(second),IDS[2:4])
+        self.assertIsNone(second.result["nextCursor"])
+
+        desc=ProjectListParams(limit=2,sort_key=ProjectSortKey.POSITION,sort_direction=SortDirection.DESC)
+        first_desc=listed(fixtures,desc)
+        self.assertEqual(first_desc.result["nextCursor"],f"v1|position|desc|-6|{IDS[2]}")
+        second_desc=listed(fixtures,ProjectListParams(
+            cursor=first_desc.result["nextCursor"],limit=2,
+            sort_key=desc.sort_key,sort_direction=desc.sort_direction,
+        ))
+        self.assertEqual(ids(second_desc),[IDS[1],IDS[0]])
+
+    def test_position_cursor_signed_i64_boundaries(self):
+        accepted=[-(2**63),2**63-1]
+        for value in accepted:
+            with self.subTest(value=value):
+                response=listed([project(1)],ProjectListParams(cursor=f"{value}|{IDS[0]}"))
+                self.assertIsInstance(response,SuccessResponse)
+
+        rejected=[-(2**63)-1,2**63,"+1","01","-0"]
+        for value in rejected:
+            with self.subTest(value=value):
+                response=listed([project(1)],ProjectListParams(cursor=f"{value}|{IDS[0]}"))
+                self.assertEqual(response.error.code,-32602)
+
     def test_pagination_crosses_to_and_anchors_in_nulls(self):
         fixtures=[project(1,recency=1),project(2,recency=2),project(3),project(4),project(5)]
         base=ProjectListParams(limit=3,sort_key=ProjectSortKey.RECENCY_AT,sort_direction=SortDirection.ASC)
@@ -75,7 +106,7 @@ class ProjectListTests(unittest.TestCase):
     def test_cursor_validation(self):
         letter_uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         bad=["x"*129,"1|x|extra","v2|position|desc|1|"+IDS[0],"v1|recencyAt|desc|1|"+IDS[0],
-             "+1|"+IDS[0],"01|"+IDS[0],"-0|"+IDS[0],"-1|"+IDS[0],"one|"+IDS[0],"1|"+letter_uuid.upper(),"1|bad"]
+             "one|"+IDS[0],"1|"+letter_uuid.upper(),"1|bad"]
         for cursor in bad:
             with self.subTest(cursor=cursor):
                 response=listed([project(1)],ProjectListParams(cursor=cursor)); self.assertEqual(response.error.code,-32602)

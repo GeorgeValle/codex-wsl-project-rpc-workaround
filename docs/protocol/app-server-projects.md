@@ -381,7 +381,9 @@ to 25 and clamp to 1–100. Stateless keyset cursors use legacy
 `<position>|<uuid>` for ascending position and
 `v1|<key>|<direction>|<value>|<uuid>` otherwise. Cursor parsing enforces the
 128-character limit, exact components, canonical integers, matching order, and
-canonical lowercase hyphenated UUIDs.
+canonical lowercase hyphenated UUIDs. Position anchors accept the complete
+signed-64-bit domain, including negative positions, and reject values outside
+that domain.
 
 `Project` remains a wire schema and intentionally accepts broader ID strings.
 Only the fake store requires canonical UUID fixture IDs so cursor generation
@@ -403,7 +405,7 @@ is consequently **mock-local**, not claimed as upstream-exact.
 
 | Condition | Evidence |
 |---|---|
-| packaging established | Packaging validator installs and imports the mock package from its copied-source environment. |
+| packaging established | Packaging validator explicitly imports both `codex_wsl_rpc` and `codex_wsl_rpc.mock` from its installed copied-source environment and verifies both module origins. |
 | deterministic test execution established | The complete standard-library unittest suite passes with fixed fixtures and sequential IDs. |
 | safety rules tested | Mock safety tests and static audits pass as trusted-development regression guards. |
 | no real Codex state needed | Runtime contains no Desktop, `~/.codex`, or SQLite access. |
