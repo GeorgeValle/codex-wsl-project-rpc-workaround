@@ -1,8 +1,14 @@
 import dataclasses
 import math
+from pathlib import Path
+import sys
 import unittest
 
-from codex_wsl_rpc.protocol import (ClientInfo, InitializeCapabilities,
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from codex_wsl_rpc.protocol import (ClientInfo, InitializeCapabilities,  # noqa: E402
     InitializeParams, InitializeResponse, ProtocolDecodeError, ProtocolModelError)
 
 class InitializationTests(unittest.TestCase):

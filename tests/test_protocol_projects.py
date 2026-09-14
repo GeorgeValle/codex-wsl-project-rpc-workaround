@@ -1,7 +1,13 @@
 import math
+from pathlib import Path
+import sys
 import unittest
 
-from codex_wsl_rpc.protocol import (Project, ProjectListParams, ProjectListResponse,
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from codex_wsl_rpc.protocol import (Project, ProjectListParams, ProjectListResponse,  # noqa: E402
     ProjectRoot, ProjectSortKey, ProtocolDecodeError, ProtocolModelError, Request,
     SortDirection, SuccessResponse)
 
