@@ -22,12 +22,18 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.result,{"userAgent":"codex-wsl-rpc-mock/1","codexHome":"/mock/codex-home","platformFamily":"mock","platformOs":"mock"})
         duplicate=initialize(server,2); self.assertEqual((duplicate.error.code,duplicate.error.message),(-32600,"Already initialized"))
 
+    def test_valid_header_client_names_initialize(self):
+        for name in ("tests-client", "tests\tclient"):
+            with self.subTest(name=repr(name)):
+                server=FakeAppServer()
+                self.assertIsInstance(initialize(server,name=name),SuccessResponse)
+
     def test_malformed_initialize_does_not_transition(self):
         server=FakeAppServer(); bad=server.handle(Request(1,"initialize",{}))
         self.assertEqual(bad.error.code,-32602); self.assertIsInstance(initialize(server,2),SuccessResponse)
 
     def test_invalid_header_client_names_do_not_initialize(self):
-        for name in ("line\nfeed","carriage\rreturn","control\x1fvalue","delete\x7fvalue","non-ascii-\N{SNOWMAN}"):
+        for name in ("line\nfeed","carriage\rreturn","control\x01value","control\x1fvalue","delete\x7fvalue","non-ascii-\N{SNOWMAN}"):
             with self.subTest(name=repr(name)):
                 server=FakeAppServer()
                 invalid=initialize(server,capabilities=True,name=name)

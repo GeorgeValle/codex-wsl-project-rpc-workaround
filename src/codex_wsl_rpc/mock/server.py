@@ -53,7 +53,10 @@ def _parse_canonical_i64(value_text: str) -> int:
 
 def _valid_header_value(value: str) -> bool:
     """Match HeaderValue::from_str for the ASCII client names used by the mock."""
-    return all(" " <= character <= "~" for character in value)
+    return all(
+        character == "\t" or " " <= character <= "~"
+        for character in value
+    )
 
 
 def _effective_order(params: ProjectListParams) -> tuple[ProjectSortKey, SortDirection]:
