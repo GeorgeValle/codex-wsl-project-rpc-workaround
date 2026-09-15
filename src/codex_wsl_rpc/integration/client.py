@@ -71,6 +71,9 @@ class ProjectListRunSummary:
     mutation_attempted: bool = False
     direct_state_inspection: bool = False
     desktop_comparison_status: str = "NOT_RUN"
+    product_state_impact: str = "NOT_ESTABLISHED"
+    network_effects: str = "NOT_ESTABLISHED"
+    helper_process_effects: str = "NOT_ESTABLISHED"
 
     def to_safe_dict(self) -> dict[str, object]:
         return {name: getattr(self, name) for name in self.__dataclass_fields__}
@@ -264,58 +267,74 @@ class ReadOnlyProjectListClient:
                 raise CleanupError("owned-child cleanup already completed")
             raise CleanupError("owned-child cleanup already attempted")
         owned_child.started = True
-        process = owned_child.process
-        transport = owned_child.transport
-        failures = []
-        outcome = "graceful"
-        if transport is not None:
-            try: transport.close()
-            except KeyboardInterrupt: owned_child.interrupted = True
-            except Exception: failures.append("transport")
-        try: process.stdin.close()
-        except KeyboardInterrupt: owned_child.interrupted = True
-        except Exception: failures.append("stdin")
+        process, transport = owned_child.process, owned_child.transport
+        failures: list[str] = []
+        outcome, state, deadline = "graceful", "transport_close", None
+        stage_timeout = CLOSE_TIMEOUT
+        reaped = False
 
-        def wait_until_finished(timeout: float) -> bool:
-            deadline = self._clock() + timeout
-            while True:
-                remaining = deadline - self._clock()
-                if remaining <= 0:
-                    return process.returncode is not None
-                try:
-                    process.wait(timeout=remaining)
-                    return True
-                except KeyboardInterrupt:
-                    owned_child.interrupted = True
-                    if process.returncode is not None:
-                        return True
-                except subprocess.TimeoutExpired:
-                    return False
-                except Exception:
-                    failures.append("wait")
-                    return process.returncode is not None
-
-        reaped = wait_until_finished(CLOSE_TIMEOUT)
-        if not reaped:
-            outcome = "terminated_owned_child"
-            owned_child.terminate_issued = True
-            try: process.terminate()
-            except KeyboardInterrupt: owned_child.interrupted = True
-            except Exception: failures.append("terminate")
-            reaped = wait_until_finished(TERMINATE_TIMEOUT)
-            if not reaped:
-                outcome = "killed_owned_child"
-                owned_child.kill_issued = True
-                try: process.kill()
-                except KeyboardInterrupt: owned_child.interrupted = True
-                except Exception: failures.append("kill")
-                reaped = wait_until_finished(KILL_TIMEOUT)
-                if not reaped:
-                    failures.append("reap")
-        if reaped:
-            owned_child.completed = True
-            owned_child.process = None
-            owned_child.transport = None
+        # Keep every transition behind one interrupt barrier. Advancing before
+        # one-shot operations prevents duplicate closes/signals, while a stage's
+        # deadline is created once and retained across interrupted clock/wait
+        # operations.
+        while state != "terminal":
+            try:
+                if state == "transport_close":
+                    state = "stdin_close"
+                    if transport is not None:
+                        try: transport.close()
+                        except Exception: failures.append("transport")
+                elif state == "stdin_close":
+                    state = "deadline"
+                    try: process.stdin.close()
+                    except Exception: failures.append("stdin")
+                elif state == "deadline":
+                    deadline = self._clock() + stage_timeout
+                    state = "wait"
+                elif state == "wait":
+                    remaining = deadline - self._clock()
+                    if remaining <= 0:
+                        reaped = process.returncode is not None
+                    else:
+                        try:
+                            process.wait(timeout=remaining)
+                            reaped = True
+                        except subprocess.TimeoutExpired:
+                            reaped = False
+                        except Exception:
+                            failures.append("wait")
+                            reaped = process.returncode is not None
+                    if reaped:
+                        state = "finalize"
+                    elif not owned_child.terminate_issued:
+                        outcome, state = "terminated_owned_child", "terminate"
+                    elif not owned_child.kill_issued:
+                        outcome, state = "killed_owned_child", "kill"
+                    else:
+                        failures.append("reap")
+                        state = "finalize"
+                elif state == "terminate":
+                    owned_child.terminate_issued = True
+                    state = "terminate_deadline"
+                    try: process.terminate()
+                    except Exception: failures.append("terminate")
+                elif state == "terminate_deadline":
+                    stage_timeout, state = TERMINATE_TIMEOUT, "deadline"
+                elif state == "kill":
+                    owned_child.kill_issued = True
+                    state = "kill_deadline"
+                    try: process.kill()
+                    except Exception: failures.append("kill")
+                elif state == "kill_deadline":
+                    stage_timeout, state = KILL_TIMEOUT, "deadline"
+                elif state == "finalize":
+                    if reaped:
+                        owned_child.completed = True
+                        owned_child.process = None
+                        owned_child.transport = None
+                    state = "terminal"
+            except KeyboardInterrupt:
+                owned_child.interrupted = True
         if failures: raise CleanupError("owned-child cleanup failed")
         if owned_child.interrupted:
             raise OperatorCancelledError("operator cancelled")

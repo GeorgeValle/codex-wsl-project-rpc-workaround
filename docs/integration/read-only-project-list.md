@@ -104,7 +104,9 @@ but code-unverified target provenance, `NOT_ESTABLISHED` target-revision mapping
 unobserved target version,
 platform strings, lifecycle booleans, sanitized Codex-home category, page
 count, `has_more`, root representation categories, cleanup outcome, and
-explicit negative mutation/state-inspection/Desktop-comparison facts. It never
+explicit negative mutation/state-inspection/Desktop-comparison facts. Product
+state impact, network effects, and helper-process effects are each reported as
+`NOT_ESTABLISHED` until real validation can establish them. It never
 includes Project names/IDs, roots, metadata, cursor, raw Codex home, stderr,
 credentials, executable path, or server error text/data.
 

@@ -437,13 +437,16 @@ research but are now delivered by Delivery 3. That delivery is limited to the
 JSON-line transport and fixture store, the fake app-server lifecycle, and
 deterministic mock `project/list` behavior.
 
-Real integration remains an explicit non-goal: no real Codex/app-server process
-startup, real stdio process transport, Unix socket transport, WebSocket/TCP
-transport, attachment to a Desktop-owned app-server, real RPC execution, real
-`project/list`, or real Project-store access is delivered. Access to
+Phase A now delivers a gated, offline-tested stdio integration path for
+`initialize`, `initialized`, and one `project/list` page. It has not been
+executed against an installed Codex product, and local WSL validation remains
+`NOT RUN`; capability therefore remains `MOCK_ONLY` and GATE-002 remains
+`UNSATISFIED`. Real product execution, Unix socket or WebSocket/TCP transport,
+attachment to a Desktop-owned app-server, and real Project-store validation
+remain explicit non-goals for this delivery. Access to
 `~/.codex`, SQLite, Desktop configuration or state, and Windows/WSL path
 adaptation also remains deferred, as do Desktop sidebar/store equivalence
-claims and Subdivision 2.3 integration. Mutation authorization remains `NONE`:
+claims. Mutation authorization remains `NONE`:
 Project mutation and `project/create`, `project/update`, `project/import`,
 `project/move`, and `project/delete` are explicit non-goals.
 

@@ -50,6 +50,13 @@ class FakeClock:
     def __init__(self): self.now = 0.0
     def __call__(self): return self.now
 
+class ScriptedClock:
+    def __init__(self, values): self.values = iter(values)
+    def __call__(self):
+        value = next(self.values)
+        if isinstance(value, BaseException): raise value
+        return value
+
 class TimedCleanupProcess(CleanupProcess):
     def __init__(self, clock, waits):
         super().__init__([]); self.clock=clock; self.waits=iter(waits); self.timeouts=[]
@@ -111,6 +118,10 @@ class ClientTests(unittest.TestCase):
         self.assertIn("validates only its executable form", IntegrationAuthorization.READ_ONLY_PROJECT_LIST.value)
         self.assertEqual(summary["codex_home_category"], "posix_absolute")
         self.assertNotIn("codex_home", summary)
+        for field in ("product_state_impact", "network_effects", "helper_process_effects"):
+            self.assertEqual(summary[field], "NOT_ESTABLISHED")
+        self.assertFalse(summary["direct_state_inspection"])
+        self.assertFalse(summary["mutation_attempted"])
 
     def test_platform_values_are_reduced_to_safe_reviewed_categories(self):
         cases = (
@@ -202,6 +213,19 @@ class ClientTests(unittest.TestCase):
         self.assertNotIn("PersonalUser", safe)
     def test_empty_page(self):
         result,_=self._run([]); self.assertEqual(result.summary.returned_page_count,0); self.assertFalse(result.summary.has_more)
+
+    def test_missing_next_cursor_fails_closed_without_success_evidence(self):
+        fake=FakeProcess([
+            {"id":1,"result":{"userAgent":"private","codexHome":"/private","platformFamily":"unix","platformOs":"linux"}},
+            {"id":2,"result":{"data":[]}},
+        ])
+        client=self._client(_popen=lambda *a,**k: fake)
+        with self.assertRaisesRegex(IntegrationError, "^project/list protocol error$") as caught:
+            client.list_one_page()
+        rendered=json.dumps({"status":"failed", "category":caught.exception.category})
+        self.assertNotIn("project_list_succeeded", rendered)
+        self.assertNotIn("has_more", rendered)
+        self.assertNotIn("data", rendered)
 
     def test_cleanup_tracks_graceful_terminate_and_kill(self):
         cases=(
@@ -338,6 +362,57 @@ class ClientTests(unittest.TestCase):
         self.assertAlmostEqual(process.timeouts[3], 2.0)
         self.assertAlmostEqual(process.timeouts[4], .5)
         process.terminate.assert_called_once_with(); process.kill.assert_called_once_with()
+
+    def test_cleanup_defers_clock_interrupts_across_entire_state_machine(self):
+        # Interrupt before the first deadline, while calculating graceful
+        # remaining time, and around both later deadline transitions.
+        clock = ScriptedClock([
+            KeyboardInterrupt(), 0.0, KeyboardInterrupt(), 0.0,
+            KeyboardInterrupt(), 2.0, KeyboardInterrupt(), 2.0,
+            KeyboardInterrupt(), 4.0, KeyboardInterrupt(), 4.0,
+        ])
+        process = CleanupProcess([
+            subprocess.TimeoutExpired("fake", 1),
+            subprocess.TimeoutExpired("fake", 1),
+            0,
+        ])
+        state = _OwnedChildCleanup(process, None)
+        with self.assertRaises(OperatorCancelledError):
+            self._client(_clock=clock)._cleanup(state)
+        self.assertTrue(state.completed)
+        self.assertIsNone(state.process)
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
+
+    def test_cleanup_defers_interrupts_between_escalation_transitions(self):
+        process = CleanupProcess([
+            subprocess.TimeoutExpired("fake", 1),
+            subprocess.TimeoutExpired("fake", 1),
+            0,
+        ])
+        process.terminate.side_effect = KeyboardInterrupt()
+        process.kill.side_effect = KeyboardInterrupt()
+        state = _OwnedChildCleanup(process, None)
+        with self.assertRaises(OperatorCancelledError):
+            self._client()._cleanup(state)
+        self.assertTrue(state.completed)
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
+
+    def test_cleanup_failure_precedes_deferred_clock_cancellation(self):
+        clock = ScriptedClock([
+            KeyboardInterrupt(), 0.0, 2.0,
+            KeyboardInterrupt(), 2.0, 4.0,
+            KeyboardInterrupt(), 4.0, 6.0,
+        ])
+        process = CleanupProcess([])
+        state = _OwnedChildCleanup(process, None)
+        with self.assertRaises(CleanupError):
+            self._client(_clock=clock)._cleanup(state)
+        self.assertTrue(state.started)
+        self.assertFalse(state.completed)
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
 
     def test_transport_construction_failure_keeps_exact_child_owned(self):
         failure_points = ("selector factory", "stdout blocking", "stderr blocking",
