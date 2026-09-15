@@ -68,16 +68,47 @@ possible WSL-first Project-management workaround.
 
 ## Binary policy
 
-- **BIN-001:** Project code and development procedures MUST NOT download or
-  execute third-party binaries.
+- **BIN-001:** Project code and development procedures MUST NOT download,
+  commit, vendor, upload, install, automatically discover, search `PATH` for,
+  or execute arbitrary third-party binaries. They MUST NOT provide hidden tool
+  bootstrap or auto-installation, execute shell commands or credential helpers,
+  use `shell=True`, or accept arbitrary user-supplied commands or argument
+  vectors.
+- **BIN-002:** A separately human-approved real-integration delivery MAY
+  execute an already-installed OpenAI Codex/app-server executable solely as
+  the explicit product under test. Execution MUST be explicitly opted into;
+  the operator MUST select the exact executable by an absolute path; reviewed
+  code MUST fix the argument vector and use `shell=False`; and the exact real
+  RPC scope MUST receive separate authorization. Repository code MUST NOT
+  search for, download, install, copy, vendor, upload, or store the executable,
+  and default or canonical tests MUST NOT execute it. The execution MUST be
+  bounded and cleaned up, and integration code MAY terminate only the child
+  process it started; it MUST NOT discover or terminate Desktop-owned
+  processes. This exception is limited to OpenAI Codex/app-server installed in
+  the operator's WSL environment: it does not permit arbitrary-command or
+  arbitrary-argument APIs, another executable, a Windows-native substitute,
+  backend fallback or auto-selection, or any network transport. Every such
+  execution remains subject to the separately reviewed RPC, state, network,
+  and mutation policies.
 
 ## Path and privacy policy
 
 - **PATH-001:** Committed code and documentation MUST NOT contain personal or
   user-specific paths; documented examples MUST use placeholders.
-- **PATH-002:** Project code and default tests MUST NOT access `~/.codex`.
-- **PATH-003:** Access to Codex SQLite state requires a future, explicit,
-  reviewed authorization.
+- **PATH-002:** Project code and default tests MUST NOT directly open, inspect,
+  query, edit, copy, repair, or otherwise access `~/.codex`,
+  `.codex-global-state.json`, Codex configuration files, or Desktop databases.
+- **PATH-003:** Direct repository-code access to Codex SQLite state, including
+  `state_*.sqlite`, requires a future, explicit, reviewed authorization.
+- **PATH-004:** During an explicitly authorized, opted-in real integration
+  exercise, an OpenAI Codex/app-server process running as the product under
+  test MAY access its own normal product state internally. That delegated
+  product behavior does not authorize repository code to open, inspect, query,
+  edit, copy, repair, or persist that state; does not authorize direct SQLite
+  access, state repair, or Desktop configuration changes; and does not
+  establish that product startup is filesystem-side-effect-free. The
+  integration delivery MUST report this delegated behavior as an
+  environment/state-impact risk.
 
 ## Network policy
 
