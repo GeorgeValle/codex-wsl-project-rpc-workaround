@@ -135,7 +135,7 @@ class _StreamTransport:
             raise TransportError("malformed UTF-8") from error
         try:
             value = json.loads(text)
-        except (json.JSONDecodeError, RecursionError) as error:
+        except (ValueError, RecursionError) as error:
             raise TransportError("malformed JSON") from error
         try:
             return parse_envelope(value)

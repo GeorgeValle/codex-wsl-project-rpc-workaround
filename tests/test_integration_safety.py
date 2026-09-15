@@ -1,9 +1,10 @@
 """Static and inertness guards for the separately gated integration."""
 from __future__ import annotations
-import argparse, ast, importlib.util, os, subprocess, sys, unittest
+import argparse, ast, importlib.util, io, json, os, subprocess, sys, unittest
 from pathlib import Path
 from unittest import mock
 ROOT=Path(__file__).resolve().parents[1]; SRC=ROOT/"src"; sys.path.insert(0,str(SRC))
+from codex_wsl_rpc.integration import client as client_errors
 
 class SafetyTests(unittest.TestCase):
     def test_no_mutation_network_discovery_or_arbitrary_api(self):
@@ -32,6 +33,28 @@ class SafetyTests(unittest.TestCase):
                      ["runner","--i-understand-this-starts-codex","--home","/fake"]):
             with self.subTest(argv=argv), mock.patch.object(sys,"argv",argv), mock.patch("codex_wsl_rpc.integration.client.subprocess.Popen",side_effect=AssertionError("spawned")):
                 with self.assertRaises(SystemExit): module.main()
+    def test_runner_serializes_only_stable_safe_error_category(self):
+        path=ROOT/"tools/run_read_only_project_list.py"; spec=importlib.util.spec_from_file_location("safe_runner",path); module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        errors=(
+            module.IntegrationError("raw", category="initialize_transport_failure"),
+            module.IntegrationError("raw", category="project_list_transport_failure"),
+            client_errors.StartupError("raw"), client_errors.CleanupError("raw"),
+            client_errors.AuthorizationError("raw"), client_errors.UnsupportedPlatformError("raw"),
+            client_errors.UnsupportedTargetError("raw"), client_errors.InitializeError("raw"),
+            client_errors.ProjectListError("raw"),
+        )
+        for error in errors:
+            category=error.category
+            with self.subTest(category=category):
+                error.args=("raw /private/executable secret Project traceback",)
+                client=mock.Mock(); client.list_one_page.side_effect=error
+                argv=["runner", "--i-understand-this-starts-codex", "--codex-executable", "/private/executable", "--home", "/private/home"]
+                output=io.StringIO()
+                with mock.patch.object(sys,"argv",argv), mock.patch.object(module,"ReadOnlyProjectListClient",return_value=client), mock.patch("sys.stdout",output):
+                    self.assertEqual(module.main(),1)
+                rendered=output.getvalue(); self.assertEqual(json.loads(rendered),{"status":"failed","category":category})
+                for private in ("raw", "private", "secret", "Project", "traceback"):
+                    self.assertNotIn(private,rendered)
     def test_runner_not_referenced_by_tests(self):
         references=[]
         for path in (ROOT/"tests").glob("test_*.py"):

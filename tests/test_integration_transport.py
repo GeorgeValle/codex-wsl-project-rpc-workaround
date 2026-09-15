@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json, os, sys, threading, time, unittest
 from pathlib import Path
+from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from codex_wsl_rpc.integration.transport import _StreamTransport, TransportError
 from codex_wsl_rpc.protocol import Notification, Request, SuccessResponse
@@ -51,5 +52,19 @@ class TransportTests(unittest.TestCase):
             with self.assertRaisesRegex(TransportError,message): self.transport.receive_response(1,time.monotonic()+10)
         os.write(self.process.stdout_writer,b'{'); os.close(self.process.stdout_writer)
         with self.assertRaisesRegex(TransportError,"incomplete"): self.transport.receive_response(1,time.monotonic()+10)
+
+    def test_all_json_value_failures_are_malformed_json(self):
+        oversized = b'{"id":' + (b'9' * 5000) + b',"result":{}}'
+        for frame in (b'{', oversized):
+            with self.subTest(size=len(frame)):
+                with self.assertRaisesRegex(TransportError, "^malformed JSON$"):
+                    self.transport._decode(frame)
+        with mock.patch("codex_wsl_rpc.integration.transport.json.loads", side_effect=RecursionError):
+            with self.assertRaisesRegex(TransportError, "^malformed JSON$"):
+                self.transport._decode(b'[]')
+
+    def test_valid_json_invalid_envelope_remains_distinct(self):
+        with self.assertRaisesRegex(TransportError, "^malformed envelope$"):
+            self.transport._decode(b'{}')
 
 if __name__ == "__main__": unittest.main()

@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from codex_wsl_rpc.integration import IntegrationAuthorization, IntegrationError, ReadOnlyProjectListClient
-from codex_wsl_rpc.integration.client import CleanupError, PINNED_CODEX_SHA
+from codex_wsl_rpc.integration.client import CleanupError, PINNED_CODEX_SHA, UnsupportedPlatformError
 from codex_wsl_rpc.integration.transport import TransportError
 from codex_wsl_rpc.protocol import SuccessResponse
 
@@ -63,9 +63,17 @@ class ClientTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); root=Path(self.temp.name); self.exe=root/"codex-native"; self.exe.write_bytes(b"\x7fELFfake"); self.exe.chmod(stat.S_IRUSR|stat.S_IWUSR|stat.S_IXUSR); self.home=root/"home"; self.home.mkdir()
     def tearDown(self): self.temp.cleanup()
+    def _client(self, **kwargs):
+        proc_reader=kwargs.pop("_proc_reader", lambda path: "5.15.90.1-MICROSOFT-standard-WSL2")
+        return ReadOnlyProjectListClient(
+            executable_path=self.exe, home_path=self.home,
+            authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,
+            _proc_reader=proc_reader,
+            **kwargs,
+        )
     def _run(self,data,next_cursor=None):
         fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":"/private","platformFamily":"unix","platformOs":"linux"}}, {"id":2,"result":{"data":data,"nextCursor":next_cursor}}])
-        client=ReadOnlyProjectListClient(executable_path=self.exe,home_path=self.home,authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,_popen=lambda *a,**k: fake)
+        client=self._client(_popen=lambda *a,**k: fake)
         return client.list_one_page(),fake
     def test_success_exact_sequence_and_safe_summary(self):
         result,fake=self._run([project(roots=[{"path":"/home/person/private"}])],"raw-cursor")
@@ -114,12 +122,12 @@ class ClientTests(unittest.TestCase):
             if calls == 1: raise subprocess.TimeoutExpired("fake", timeout)
             return original_wait(timeout)
         fake.wait=wait
-        client=ReadOnlyProjectListClient(executable_path=self.exe,home_path=self.home,authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,_popen=lambda *a,**k: fake)
+        client=self._client(_popen=lambda *a,**k: fake)
         self.assertEqual(client.list_one_page().summary.cleanup_outcome, "terminated_owned_child")
 
     def test_explicit_cleanup_failure_is_not_retried_or_masked(self):
         fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":"/private","platformFamily":"unix","platformOs":"linux"}}, {"id":2,"result":{"data":[],"nextCursor":None}}])
-        client=ReadOnlyProjectListClient(executable_path=self.exe,home_path=self.home,authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,_popen=lambda *a,**k: fake)
+        client=self._client(_popen=lambda *a,**k: fake)
         primary=CleanupError("owned-child cleanup failed")
         with mock.patch.object(client, "_cleanup", side_effect=primary) as cleanup:
             with self.assertRaises(CleanupError) as caught: client.list_one_page()
@@ -130,21 +138,21 @@ class ClientTests(unittest.TestCase):
             with self.subTest(failure=type(failure).__name__):
                 process=CleanupProcess([0]); transport=mock.Mock()
                 transport.send.side_effect=failure
-                client=ReadOnlyProjectListClient(executable_path=self.exe,home_path=self.home,authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,_popen=lambda *a,**k: process)
+                client=self._client(_popen=lambda *a,**k: process)
                 with mock.patch("codex_wsl_rpc.integration.client._StreamTransport", return_value=transport), mock.patch.object(client, "_cleanup", return_value="graceful") as cleanup:
                     with self.assertRaises(IntegrationError): client.list_one_page()
                 cleanup.assert_called_once_with(process, transport)
 
     def test_method_not_found_remains_ambiguous_and_private(self):
         fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":"/private","platformFamily":"unix","platformOs":"linux"}}, {"id":2,"error":{"code":-32601,"message":"secret method or store detail","data":{"path":"/private/project"}}}])
-        client=ReadOnlyProjectListClient(executable_path=self.exe,home_path=self.home,authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,_popen=lambda *a,**k: fake)
+        client=self._client(_popen=lambda *a,**k: fake)
         with self.assertRaises(IntegrationError) as caught: client.list_one_page()
         self.assertEqual(str(caught.exception), "project/list unavailable or unsupported")
         self.assertNotIn("store unavailable", str(caught.exception)); self.assertNotIn("secret", str(caught.exception)); self.assertNotIn("private", str(caught.exception))
 
     def test_other_protocol_errors_remain_generic_and_private(self):
         fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":"/private","platformFamily":"unix","platformOs":"linux"}}, {"id":2,"error":{"code":-32603,"message":"secret","data":{"project":"private"}}}])
-        client=ReadOnlyProjectListClient(executable_path=self.exe,home_path=self.home,authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,_popen=lambda *a,**k: fake)
+        client=self._client(_popen=lambda *a,**k: fake)
         with self.assertRaises(IntegrationError) as caught: client.list_one_page()
         self.assertEqual(str(caught.exception), "project/list protocol error")
 
@@ -155,10 +163,40 @@ class ClientTests(unittest.TestCase):
                 process=CleanupProcess([0])
                 transport=ScriptedTransport(failure_at)
                 with mock.patch("codex_wsl_rpc.integration.client._StreamTransport", return_value=transport):
-                    client=ReadOnlyProjectListClient(executable_path=self.exe,home_path=self.home,authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,_popen=lambda *a,**k: process)
+                    client=self._client(_popen=lambda *a,**k: process)
                     with self.assertRaises(IntegrationError) as caught: client.list_one_page()
                 rendered=str(caught.exception)
                 self.assertEqual(rendered, f"{category} transport failure")
+                self.assertEqual(caught.exception.category, f"{category.replace('/', '_')}_transport_failure")
                 self.assertNotIn("private", rendered); self.assertNotIn("secret", rendered)
+
+    def test_platform_validation_requires_positive_proc_wsl_evidence_first(self):
+        accepted = ("4.4.0-19041-Microsoft", "5.15.90.1-mIcRoSoFt-standard-WSL2", "Linux WSL kernel")
+        for evidence in accepted:
+            with self.subTest(evidence=evidence):
+                client=self._client(_proc_reader=lambda path, text=evidence: text)
+                self.assertTrue(client._is_wsl())
+        rejected = (("linux", "6.8.0-generic"), ("linux", "container-linux"),
+                    ("win32", "Microsoft WSL2"), ("darwin", "Microsoft WSL2"))
+        for platform, evidence in rejected:
+            with self.subTest(platform=platform, evidence=evidence):
+                popen=mock.Mock()
+                client=self._client(_platform=platform, _proc_reader=lambda path, text=evidence: text,
+                                    _popen=popen)
+                with self.assertRaises(UnsupportedPlatformError): client.list_one_page()
+                popen.assert_not_called()
+
+    def test_missing_proc_evidence_and_environment_alone_fail_before_target_access(self):
+        missing=self.temp.name + "/does-not-exist"
+        popen=mock.Mock()
+        client=ReadOnlyProjectListClient(
+            executable_path=Path(missing), home_path=self.home,
+            authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,
+            _popen=popen, _platform="linux",
+            _proc_reader=lambda path: (_ for _ in ()).throw(OSError("unreadable")),
+        )
+        with mock.patch.dict(os.environ, {"WSL_DISTRO_NAME":"Ubuntu", "WSL_INTEROP":"fake"}):
+            with self.assertRaises(UnsupportedPlatformError): client.list_one_page()
+        popen.assert_not_called()
 
 if __name__ == "__main__": unittest.main()

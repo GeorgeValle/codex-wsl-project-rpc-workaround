@@ -19,7 +19,7 @@ def main() -> int:
     try:
         result=ReadOnlyProjectListClient(executable_path=args.codex_executable,home_path=args.home,authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST).list_one_page()
     except IntegrationError as error:
-        print(json.dumps({"status":"failed","category":type(error).__name__}))
+        print(json.dumps({"status":"failed","category":error.category}))
         return 1
     print(json.dumps(result.summary.to_safe_dict(),sort_keys=True))
     return 0

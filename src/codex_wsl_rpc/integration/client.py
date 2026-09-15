@@ -32,17 +32,22 @@ class IntegrationAuthorization(Enum):
     )
 
 class IntegrationError(RuntimeError):
-    """Safe base error; messages never include product data or paths."""
+    """Safe base error with an explicitly operator-safe machine category."""
+    category = "integration_failure"
 
-class AuthorizationError(IntegrationError): pass
-class InvalidTargetError(IntegrationError): pass
-class UnsupportedPlatformError(IntegrationError): pass
-class UnsupportedTargetError(IntegrationError): pass
-class StartupError(IntegrationError): pass
-class InitializeError(IntegrationError): pass
-class ProjectListError(IntegrationError): pass
-class CleanupError(IntegrationError): pass
-class OperatorCancelledError(IntegrationError): pass
+    def __init__(self, message: str, *, category: str | None = None) -> None:
+        super().__init__(message)
+        self.category = category or type(self).category
+
+class AuthorizationError(IntegrationError): category = "authorization_required"
+class InvalidTargetError(IntegrationError): category = "invalid_target"
+class UnsupportedPlatformError(IntegrationError): category = "unsupported_platform"
+class UnsupportedTargetError(IntegrationError): category = "unsupported_target"
+class StartupError(IntegrationError): category = "startup_failure"
+class InitializeError(IntegrationError): category = "initialize_protocol_error"
+class ProjectListError(IntegrationError): category = "project_list_protocol_error"
+class CleanupError(IntegrationError): category = "cleanup_failure"
+class OperatorCancelledError(IntegrationError): category = "operator_cancelled"
 
 @dataclass(frozen=True, slots=True)
 class ProjectListRunSummary:
@@ -83,18 +88,35 @@ class ReadOnlyProjectListClient:
     def __init__(self, *, executable_path: Path, home_path: Path,
                  authorization: IntegrationAuthorization,
                  _popen: Callable[..., object] = subprocess.Popen,
-                 _clock: Callable[[], float] = time.monotonic) -> None:
+                 _clock: Callable[[], float] = time.monotonic,
+                 _platform: str | None = None,
+                 _proc_reader: Callable[[Path], str] = Path.read_text) -> None:
         self._executable_path = Path(executable_path)
         self._home_path = Path(home_path)
         self._authorization = authorization
         self._popen = _popen
         self._clock = _clock
+        self._platform = sys.platform if _platform is None else _platform
+        self._proc_reader = _proc_reader
+
+    def _is_wsl(self) -> bool:
+        if not self._platform.startswith("linux"):
+            return False
+        for path in (Path("/proc/sys/kernel/osrelease"), Path("/proc/version")):
+            try:
+                evidence = self._proc_reader(path)
+            except (OSError, UnicodeError):
+                continue
+            lowered = evidence.casefold()
+            if "microsoft" in lowered or "wsl" in lowered:
+                return True
+        return False
 
     def _validate(self) -> None:
         if self._authorization is not IntegrationAuthorization.READ_ONLY_PROJECT_LIST:
             raise AuthorizationError("explicit read-only authorization is missing")
-        if not sys.platform.startswith("linux"):
-            raise UnsupportedPlatformError("only Linux/WSL is supported")
+        if not self._is_wsl():
+            raise UnsupportedPlatformError("positive WSL evidence is required")
         path = self._executable_path
         if not path.is_absolute() or not path.exists():
             raise InvalidTargetError("target must be an existing absolute path")
@@ -150,7 +172,8 @@ class ReadOnlyProjectListClient:
             response = transport.receive_response(2, list_deadline)
             if isinstance(response, ErrorResponse):
                 category = "project/list unavailable or unsupported" if response.error.code == -32601 else "project/list protocol error"
-                raise ProjectListError(category)
+                safe_code = "project_list_unavailable" if response.error.code == -32601 else None
+                raise ProjectListError(category, category=safe_code)
             if not isinstance(response, SuccessResponse): raise ProjectListError("project/list protocol error")
             try: page = ProjectListResponse.from_wire(response.result)
             except ValueError as error: raise ProjectListError("project/list protocol error") from error
@@ -170,7 +193,10 @@ class ReadOnlyProjectListClient:
             raise OperatorCancelledError("operator cancelled") from error
         except TransportError as error:
             category = "initialize" if phase in {"initialize_send", "initialize_wait", "initialized_send"} else "project/list"
-            raise IntegrationError(f"{category} transport failure") from error
+            raise IntegrationError(
+                f"{category} transport failure",
+                category=f"{category.replace('/', '_')}_transport_failure",
+            ) from error
         finally:
             if process is not None:
                 self._cleanup(process, transport)
