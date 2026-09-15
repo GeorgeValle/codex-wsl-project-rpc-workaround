@@ -89,6 +89,11 @@ class _OwnedChildCleanup:
     kill_issued: bool = False
     interrupted: bool = False
 
+@dataclass(frozen=True, slots=True)
+class _ExecutableIdentity:
+    device: int
+    inode: int
+
 def _path_category(path: str) -> str:
     if not path: return "empty"
     if path.startswith("\\\\"): return "unc_absolute"
@@ -98,13 +103,22 @@ def _path_category(path: str) -> str:
         return "windows_drive_absolute"
     return "relative"
 
+def _platform_family_category(value: str) -> str:
+    """Reduce server-controlled platform-family text to reviewed tokens."""
+    return value if value in {"unix", "windows"} else "unknown"
+
+def _platform_os_category(value: str) -> str:
+    """Reduce server-controlled platform-OS text to reviewed tokens."""
+    return value if value in {"linux", "windows"} else "unknown"
+
 class ReadOnlyProjectListClient:
     def __init__(self, *, executable_path: Path, home_path: Path,
                  authorization: IntegrationAuthorization,
                  _popen: Callable[..., object] = subprocess.Popen,
                  _clock: Callable[[], float] = time.monotonic,
                  _platform: str | None = None,
-                 _proc_reader: Callable[[Path], str] = Path.read_text) -> None:
+                 _proc_reader: Callable[[Path], str] = Path.read_text,
+                 _lstat: Callable[[Path], os.stat_result] = os.lstat) -> None:
         self._executable_path = Path(executable_path)
         self._home_path = Path(home_path)
         self._authorization = authorization
@@ -112,6 +126,7 @@ class ReadOnlyProjectListClient:
         self._clock = _clock
         self._platform = sys.platform if _platform is None else _platform
         self._proc_reader = _proc_reader
+        self._lstat = _lstat
 
     def _is_wsl(self) -> bool:
         if not self._platform.startswith("linux"):
@@ -126,7 +141,7 @@ class ReadOnlyProjectListClient:
                 return True
         return False
 
-    def _validate(self) -> None:
+    def _validate(self) -> _ExecutableIdentity:
         if self._authorization is not IntegrationAuthorization.READ_ONLY_PROJECT_LIST:
             raise AuthorizationError("explicit read-only authorization is missing")
         if not self._is_wsl():
@@ -135,26 +150,45 @@ class ReadOnlyProjectListClient:
         if not path.is_absolute() or not path.exists():
             raise InvalidTargetError("target must be an existing absolute path")
         try:
-            mode = path.lstat().st_mode
+            path_status = self._lstat(path)
             with path.open("rb") as executable:
+                opened_status = os.fstat(executable.fileno())
                 header = executable.read(4)
         except OSError as error:
             raise InvalidTargetError("target could not be validated") from error
-        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode) or not os.access(path, os.X_OK):
+        if (stat.S_ISLNK(path_status.st_mode) or
+                not stat.S_ISREG(opened_status.st_mode) or
+                not opened_status.st_mode & 0o111):
             raise UnsupportedTargetError("target must be a reviewed executable regular file")
+        if ((path_status.st_dev, path_status.st_ino) !=
+                (opened_status.st_dev, opened_status.st_ino)):
+            raise InvalidTargetError("target identity changed during validation")
         if header != b"\x7fELF":
             raise UnsupportedTargetError("target must be the reviewed concrete native executable")
         if not self._home_path.is_absolute() or not self._home_path.is_dir():
             raise InvalidTargetError("home must be an existing absolute directory")
+        return _ExecutableIdentity(opened_status.st_dev, opened_status.st_ino)
+
+    def _recheck_executable_identity(self, identity: _ExecutableIdentity) -> None:
+        try:
+            current = self._lstat(self._executable_path)
+        except OSError as error:
+            raise InvalidTargetError("target identity changed before execution") from error
+        if (stat.S_ISLNK(current.st_mode) or
+                not stat.S_ISREG(current.st_mode) or
+                not current.st_mode & 0o111 or
+                (current.st_dev, current.st_ino) != (identity.device, identity.inode)):
+            raise InvalidTargetError("target identity changed before execution")
 
     def list_one_page(self) -> ProjectListRunResult:
-        self._validate()
+        executable_identity = self._validate()
         process = transport = None
         owned_child = None
         cleanup = "not_started"
         phase = "startup"
         try:
             try:
+                self._recheck_executable_identity(executable_identity)
                 process = self._popen(
                     [str(self._executable_path), "app-server", "--listen", "stdio://"],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -206,8 +240,8 @@ class ReadOnlyProjectListClient:
             process = transport = None
             summary = ProjectListRunSummary(PINNED_CODEX_SHA, datetime.now(timezone.utc).isoformat(),
                 "operator_confirmed_openai_codex_unverified_by_repository", "NOT_ESTABLISHED",
-                "unobserved", initialized.platform_family,
-                initialized.platform_os, True, True, True, True, True,
+                "unobserved", _platform_family_category(initialized.platform_family),
+                _platform_os_category(initialized.platform_os), True, True, True, True, True,
                 _path_category(initialized.codex_home), len(page.data), page.next_cursor is not None,
                 categories, cleanup)
             return ProjectListRunResult(summary)

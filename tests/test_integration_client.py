@@ -5,8 +5,9 @@ from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from codex_wsl_rpc.integration import IntegrationAuthorization, IntegrationError, ReadOnlyProjectListClient
-from codex_wsl_rpc.integration.client import (CleanupError, OperatorCancelledError,
-    PINNED_CODEX_SHA, StartupError, UnsupportedPlatformError, _OwnedChildCleanup)
+from codex_wsl_rpc.integration.client import (CleanupError, InvalidTargetError,
+    OperatorCancelledError, PINNED_CODEX_SHA, StartupError,
+    UnsupportedPlatformError, _OwnedChildCleanup)
 from codex_wsl_rpc.integration.transport import TransportError
 from codex_wsl_rpc.protocol import SuccessResponse
 
@@ -87,8 +88,9 @@ class ClientTests(unittest.TestCase):
             _proc_reader=proc_reader,
             **kwargs,
         )
-    def _run(self,data,next_cursor=None,codex_home="/private"):
-        fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":codex_home,"platformFamily":"unix","platformOs":"linux"}}, {"id":2,"result":{"data":data,"nextCursor":next_cursor}}])
+    def _run(self,data,next_cursor=None,codex_home="/private",
+             platform_family="unix", platform_os="linux"):
+        fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":codex_home,"platformFamily":platform_family,"platformOs":platform_os}}, {"id":2,"result":{"data":data,"nextCursor":next_cursor}}])
         client=self._client(_popen=lambda *a,**k: fake)
         return client.list_one_page(),fake
     def test_success_exact_sequence_and_safe_summary(self):
@@ -109,6 +111,68 @@ class ClientTests(unittest.TestCase):
         self.assertIn("validates only its executable form", IntegrationAuthorization.READ_ONLY_PROJECT_LIST.value)
         self.assertEqual(summary["codex_home_category"], "posix_absolute")
         self.assertNotIn("codex_home", summary)
+
+    def test_platform_values_are_reduced_to_safe_reviewed_categories(self):
+        cases = (
+            ("unix", "linux", "unix", "linux"),
+            ("windows", "windows", "windows", "windows"),
+            ("", "", "unknown", "unknown"),
+            ("macos", "macos", "unknown", "unknown"),
+            ("/home/person/private", "secret-token", "unknown", "unknown"),
+            ("linux\n/private/diagnostic", "windows\x00secret", "unknown", "unknown"),
+        )
+        for family, os_name, expected_family, expected_os in cases:
+            with self.subTest(family=family, os_name=os_name):
+                result, _ = self._run([], platform_family=family, platform_os=os_name)
+                safe = result.summary.to_safe_dict()
+                self.assertEqual(safe["platform_family"], expected_family)
+                self.assertEqual(safe["platform_os"], expected_os)
+                rendered = json.dumps(safe)
+                if expected_family == "unknown" and family:
+                    self.assertNotIn(family, rendered)
+                if expected_os == "unknown" and os_name:
+                    self.assertNotIn(os_name, rendered)
+
+    def test_executable_identity_is_rechecked_immediately_before_launch(self):
+        actual = os.lstat(self.exe)
+        changed = {
+            "inode": (actual.st_dev, actual.st_ino + 1, actual.st_mode),
+            "device": (actual.st_dev + 1, actual.st_ino, actual.st_mode),
+            "symlink": (actual.st_dev, actual.st_ino, stat.S_IFLNK | 0o777),
+            "non_regular": (actual.st_dev, actual.st_ino, stat.S_IFDIR | 0o755),
+            "not_executable": (actual.st_dev, actual.st_ino, stat.S_IFREG | 0o600),
+        }
+        for label, (device, inode, mode) in changed.items():
+            with self.subTest(label=label):
+                replacement = mock.Mock(st_dev=device, st_ino=inode, st_mode=mode)
+                observations = iter((actual, replacement))
+                popen = mock.Mock()
+                client = self._client(_lstat=lambda path: next(observations), _popen=popen)
+                with self.assertRaisesRegex(InvalidTargetError,
+                                            "^target identity changed before execution$") as caught:
+                    client.list_one_page()
+                self.assertNotIn(str(self.exe), str(caught.exception))
+                popen.assert_not_called()
+
+        observations = iter((actual, OSError("gone")))
+        popen = mock.Mock()
+        client = self._client(
+            _lstat=lambda path: (lambda value: (_ for _ in ()).throw(value)
+                                 if isinstance(value, BaseException) else value)(next(observations)),
+            _popen=popen,
+        )
+        with self.assertRaisesRegex(InvalidTargetError,
+                                    "^target identity changed before execution$"):
+            client.list_one_page()
+        popen.assert_not_called()
+
+    def test_unchanged_executable_identity_allows_fake_launch(self):
+        actual = os.lstat(self.exe)
+        result, fake = self._run([])
+        self.assertEqual(result.summary.target_revision_mapping, "NOT_ESTABLISHED")
+        self.assertEqual(len(fake.requests), 3)
+        self.assertEqual((actual.st_dev, actual.st_ino),
+                         (os.lstat(self.exe).st_dev, os.lstat(self.exe).st_ino))
 
     def test_codex_home_category_is_derived_without_exposing_raw_path(self):
         cases = (
