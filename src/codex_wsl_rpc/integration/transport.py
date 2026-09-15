@@ -9,7 +9,7 @@ import selectors
 import time
 from typing import Callable
 
-from codex_wsl_rpc.protocol import Envelope, Notification, Request, parse_envelope
+from codex_wsl_rpc.protocol import Envelope, Notification, Request, RequestId, parse_envelope
 
 MAX_STDOUT_FRAME = 1024 * 1024
 MAX_STDOUT_SESSION = 8 * 1024 * 1024
@@ -37,7 +37,8 @@ class _StreamTransport:
         self._stderr = bytearray()
         self._notifications = 0
         self._notification_bytes = 0
-        self._outstanding_request_id: int | None = None
+        self._outstanding_request_id: RequestId | None = None
+        self._unusable = False
         for stream, event in ((process.stdout, "stdout"), (process.stderr, "stderr")):
             os.set_blocking(stream.fileno(), False)
             self._selector.register(stream, selectors.EVENT_READ, event)
@@ -47,6 +48,8 @@ class _StreamTransport:
         self._selector.close()
 
     def send(self, envelope: Request | Notification, deadline: float) -> None:
+        if self._unusable:
+            raise TransportError("request session unusable")
         if envelope.method not in ALLOWED_WRITES:
             raise TransportError("outbound method denied")
         if isinstance(envelope, Request):
@@ -62,23 +65,28 @@ class _StreamTransport:
             self._outstanding_request_id = envelope.id
         payload = json.dumps(envelope.to_wire(), separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
         view = memoryview(payload)
-        while view:
-            if self._clock() >= deadline:
-                raise TransportError("write timeout")
-            try:
-                written = os.write(self._process.stdin.fileno(), view)
-            except BlockingIOError:
-                written = 0
-            except BrokenPipeError as error:
-                raise TransportError("broken pipe") from error
-            if written:
-                view = view[written:]
-                continue
-            with selectors.DefaultSelector() as selector:
-                selector.register(self._process.stdin, selectors.EVENT_WRITE)
-                selector.select(max(0.0, deadline - self._clock()))
+        try:
+            while view:
+                if self._clock() >= deadline:
+                    raise TransportError("write timeout")
+                try:
+                    written = os.write(self._process.stdin.fileno(), view)
+                except BlockingIOError:
+                    written = 0
+                except BrokenPipeError as error:
+                    raise TransportError("broken pipe") from error
+                if written:
+                    view = view[written:]
+                    continue
+                with selectors.DefaultSelector() as selector:
+                    selector.register(self._process.stdin, selectors.EVENT_WRITE)
+                    selector.select(max(0.0, deadline - self._clock()))
+        except BaseException:
+            if isinstance(envelope, Request):
+                self._unusable = True
+            raise
 
-    def receive_response(self, expected_id: int, deadline: float) -> Envelope:
+    def receive_response(self, expected_id: RequestId, deadline: float) -> Envelope:
         if self._outstanding_request_id != expected_id:
             raise TransportError("response correlation error")
         while True:
@@ -90,7 +98,7 @@ class _StreamTransport:
                     continue
                 if isinstance(envelope, Request):
                     raise TransportError("unexpected server request")
-                if type(envelope.id) is not int or envelope.id != expected_id:
+                if type(envelope.id) is not type(expected_id) or envelope.id != expected_id:
                     raise TransportError("response correlation error")
                 self._outstanding_request_id = None
                 return envelope

@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from enum import Enum
 import os
 from pathlib import Path
+import secrets
+import signal
 import stat
 import subprocess
 import sys
@@ -82,20 +84,26 @@ class ProjectListRunSummary:
 class ProjectListRunResult:
     summary: ProjectListRunSummary
 
+class _SignalDelivery(Enum):
+    NOT_ATTEMPTED = "not_attempted"
+    DELIVERY_UNCERTAIN = "delivery_uncertain"
+    DELIVERED = "delivered"
+
 @dataclass(slots=True)
 class _OwnedChildCleanup:
     process: object | None
     transport: object | None
     started: bool = False
     completed: bool = False
-    terminate_issued: bool = False
-    kill_issued: bool = False
+    terminate_state: _SignalDelivery = _SignalDelivery.NOT_ATTEMPTED
+    kill_state: _SignalDelivery = _SignalDelivery.NOT_ATTEMPTED
+    terminate_attempts: int = 0
+    kill_attempts: int = 0
     interrupted: bool = False
 
 @dataclass(frozen=True, slots=True)
-class _ExecutableIdentity:
-    device: int
-    inode: int
+class _ValidatedExecutable:
+    fd: int
 
 def _path_category(path: str) -> str:
     if not path: return "empty"
@@ -121,7 +129,9 @@ class ReadOnlyProjectListClient:
                  _clock: Callable[[], float] = time.monotonic,
                  _platform: str | None = None,
                  _proc_reader: Callable[[Path], str] = Path.read_text,
-                 _lstat: Callable[[Path], os.stat_result] = os.lstat) -> None:
+                 _lstat: Callable[[Path], os.stat_result] = os.lstat,
+                 _id_generator: Callable[[], str] = lambda: secrets.token_hex(16),
+                 _sigmask: Callable[..., object] = signal.pthread_sigmask) -> None:
         self._executable_path = Path(executable_path)
         self._home_path = Path(home_path)
         self._authorization = authorization
@@ -130,6 +140,8 @@ class ReadOnlyProjectListClient:
         self._platform = sys.platform if _platform is None else _platform
         self._proc_reader = _proc_reader
         self._lstat = _lstat
+        self._id_generator = _id_generator
+        self._sigmask = _sigmask
 
     def _is_wsl(self) -> bool:
         if not self._platform.startswith("linux"):
@@ -144,67 +156,77 @@ class ReadOnlyProjectListClient:
                 return True
         return False
 
-    def _validate(self) -> _ExecutableIdentity:
+    def _validate(self) -> _ValidatedExecutable:
         if self._authorization is not IntegrationAuthorization.READ_ONLY_PROJECT_LIST:
             raise AuthorizationError("explicit read-only authorization is missing")
         if not self._is_wsl():
             raise UnsupportedPlatformError("positive WSL evidence is required")
         path = self._executable_path
-        if not path.is_absolute() or not path.exists():
+        if not path.is_absolute():
             raise InvalidTargetError("target must be an existing absolute path")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = None
         try:
             path_status = self._lstat(path)
-            with path.open("rb") as executable:
-                opened_status = os.fstat(executable.fileno())
-                header = executable.read(4)
+            fd = os.open(path, flags)
+            opened_status = os.fstat(fd)
+            header = os.pread(fd, 4, 0)
         except OSError as error:
+            if fd is not None:
+                os.close(fd)
             raise InvalidTargetError("target could not be validated") from error
         if (stat.S_ISLNK(path_status.st_mode) or
                 not stat.S_ISREG(opened_status.st_mode) or
                 not opened_status.st_mode & 0o111):
+            os.close(fd)
             raise UnsupportedTargetError("target must be a reviewed executable regular file")
         if ((path_status.st_dev, path_status.st_ino) !=
                 (opened_status.st_dev, opened_status.st_ino)):
+            os.close(fd)
             raise InvalidTargetError("target identity changed during validation")
         if header != b"\x7fELF":
+            os.close(fd)
             raise UnsupportedTargetError("target must be the reviewed concrete native executable")
         if not self._home_path.is_absolute() or not self._home_path.is_dir():
+            os.close(fd)
             raise InvalidTargetError("home must be an existing absolute directory")
-        return _ExecutableIdentity(opened_status.st_dev, opened_status.st_ino)
+        return _ValidatedExecutable(fd)
 
-    def _recheck_executable_identity(self, identity: _ExecutableIdentity) -> None:
-        try:
-            current = self._lstat(self._executable_path)
-        except OSError as error:
-            raise InvalidTargetError("target identity changed before execution") from error
-        if (stat.S_ISLNK(current.st_mode) or
-                not stat.S_ISREG(current.st_mode) or
-                not current.st_mode & 0o111 or
-                (current.st_dev, current.st_ino) != (identity.device, identity.inode)):
-            raise InvalidTargetError("target identity changed before execution")
+    def _next_request_id(self, used: set[str]) -> str:
+        request_id = self._id_generator()
+        if not isinstance(request_id, str) or not request_id or request_id in used:
+            raise IntegrationError("request id generation failed")
+        used.add(request_id)
+        return request_id
 
     def list_one_page(self) -> ProjectListRunResult:
-        executable_identity = self._validate()
+        executable = self._validate()
         process = transport = None
         owned_child = None
         cleanup = "not_started"
         phase = "startup"
+        request_ids: set[str] = set()
         try:
             try:
-                self._recheck_executable_identity(executable_identity)
-                process = self._popen(
-                    [str(self._executable_path), "app-server", "--listen", "stdio://"],
+                previous_mask = self._sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+                try:
+                    process = self._popen(
+                    [f"/proc/self/fd/{executable.fd}", "app-server", "--listen", "stdio://"],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     env={"HOME": str(self._home_path), "PATH": os.defpath,
                          "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}, shell=False,
-                    bufsize=0, close_fds=True,
-                )
+                    bufsize=0, close_fds=True, pass_fds=(executable.fd,),
+                    )
+                    owned_child = _OwnedChildCleanup(process, None)
+                finally:
+                    self._sigmask(signal.SIG_SETMASK, previous_mask)
             except OSError as error:
                 raise StartupError("app-server startup failed") from error
+            finally:
+                os.close(executable.fd)
             # Popen transfers ownership of this exact child immediately.  Keep
             # that ownership even if transport initialization only partially
             # succeeds and raises.
-            owned_child = _OwnedChildCleanup(process, None)
             try:
                 transport = _StreamTransport(process, clock=self._clock)
             except Exception as error:
@@ -212,10 +234,11 @@ class ReadOnlyProjectListClient:
             owned_child.transport = transport
             init_deadline = self._clock() + INITIALIZE_TIMEOUT
             params = InitializeParams(ClientInfo("codex-wsl-rpc-read-only", "1"), InitializeCapabilities(experimental_api=True))
+            initialize_id = self._next_request_id(request_ids)
             phase = "initialize_send"
-            transport.send(Request(1, "initialize", params.to_wire()), init_deadline)
+            transport.send(Request(initialize_id, "initialize", params.to_wire()), init_deadline)
             phase = "initialize_wait"
-            response = transport.receive_response(1, init_deadline)
+            response = transport.receive_response(initialize_id, init_deadline)
             if isinstance(response, ErrorResponse):
                 raise InitializeError("initialize protocol error")
             if not isinstance(response, SuccessResponse):
@@ -226,10 +249,11 @@ class ReadOnlyProjectListClient:
             transport.send(Notification("initialized"), init_deadline)
             list_deadline = self._clock() + PROJECT_LIST_TIMEOUT
             list_params = ProjectListParams(None, 25, ProjectSortKey.POSITION, SortDirection.ASC)
+            project_list_id = self._next_request_id(request_ids)
             phase = "project_list_send"
-            transport.send(Request(2, "project/list", list_params.to_wire()), list_deadline)
+            transport.send(Request(project_list_id, "project/list", list_params.to_wire()), list_deadline)
             phase = "project_list_wait"
-            response = transport.receive_response(2, list_deadline)
+            response = transport.receive_response(project_list_id, list_deadline)
             if isinstance(response, ErrorResponse):
                 category = "project/list unavailable or unsupported" if response.error.code == -32601 else "project/list protocol error"
                 safe_code = "project_list_unavailable" if response.error.code == -32601 else None
@@ -306,24 +330,36 @@ class ReadOnlyProjectListClient:
                             reaped = process.returncode is not None
                     if reaped:
                         state = "finalize"
-                    elif not owned_child.terminate_issued:
+                    elif (owned_child.terminate_state is not _SignalDelivery.DELIVERED and
+                          owned_child.terminate_attempts < 2):
                         outcome, state = "terminated_owned_child", "terminate"
-                    elif not owned_child.kill_issued:
+                    elif (owned_child.kill_state is not _SignalDelivery.DELIVERED and
+                          owned_child.kill_attempts < 2):
                         outcome, state = "killed_owned_child", "kill"
                     else:
                         failures.append("reap")
                         state = "finalize"
                 elif state == "terminate":
-                    owned_child.terminate_issued = True
+                    owned_child.terminate_attempts += 1
+                    owned_child.terminate_state = _SignalDelivery.DELIVERY_UNCERTAIN
                     state = "terminate_deadline"
-                    try: process.terminate()
+                    try:
+                        process.terminate()
+                        owned_child.terminate_state = _SignalDelivery.DELIVERED
+                    except KeyboardInterrupt:
+                        owned_child.interrupted = True
                     except Exception: failures.append("terminate")
                 elif state == "terminate_deadline":
                     stage_timeout, state = TERMINATE_TIMEOUT, "deadline"
                 elif state == "kill":
-                    owned_child.kill_issued = True
+                    owned_child.kill_attempts += 1
+                    owned_child.kill_state = _SignalDelivery.DELIVERY_UNCERTAIN
                     state = "kill_deadline"
-                    try: process.kill()
+                    try:
+                        process.kill()
+                        owned_child.kill_state = _SignalDelivery.DELIVERED
+                    except KeyboardInterrupt:
+                        owned_child.interrupted = True
                     except Exception: failures.append("kill")
                 elif state == "kill_deadline":
                     stage_timeout, state = KILL_TIMEOUT, "deadline"

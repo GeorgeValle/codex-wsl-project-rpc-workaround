@@ -50,11 +50,32 @@ class TransportTests(unittest.TestCase):
         self.transport.send(Request(1,"initialize",{}), time.monotonic()+10)
         self.assertEqual(os.read(self.process.stdin_reader, 100), b'{"id":1,"method":"initialize","params":{}}\n')
         with self.assertRaisesRegex(TransportError,"denied"): self.transport.send(Request(2,"project/create",{}),time.monotonic()+10)
-    def test_unknown_notification_server_request_and_string_id_fail_closed(self):
+    def test_unknown_notification_server_request_and_mismatched_ids_fail_closed(self):
         self._send_request(1, "initialize")
         for payload, message in ((b'{"method":"other"}\n',"notification"),(b'{"id":9,"method":"thing"}\n',"server request"),(b'{"id":0,"result":{}}\n',"correlation"),(b'{"id":2,"result":{}}\n',"correlation"),(b'{"id":"1","result":{}}\n',"correlation")):
             os.write(self.process.stdout_writer,payload)
             with self.assertRaisesRegex(TransportError,message): self.transport.receive_response(1,time.monotonic()+10)
+
+    def test_string_request_id_requires_exact_string_response(self):
+        self._send_request("unpredictable-a", "initialize")
+        os.write(self.process.stdout_writer, b'{"id":1,"result":{}}\n')
+        with self.assertRaisesRegex(TransportError, "correlation"):
+            self.transport.receive_response("unpredictable-a", time.monotonic()+10)
+
+    def test_partial_request_write_poisoned_session_cannot_send_again(self):
+        real_write = os.write
+        calls = 0
+        def partial_then_fail(fd, data):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_write(fd, bytes(data[:5]))
+            raise BrokenPipeError()
+        with mock.patch("codex_wsl_rpc.integration.transport.os.write", side_effect=partial_then_fail):
+            with self.assertRaisesRegex(TransportError, "broken pipe"):
+                self.transport.send(Request("fresh-a", "initialize", {}), time.monotonic()+10)
+        with self.assertRaisesRegex(TransportError, "session unusable"):
+            self.transport.send(Request("fresh-b", "project/list", {}), time.monotonic()+10)
     def test_malformed_utf8_json_envelope_and_incomplete_eof(self):
         self._send_request(1, "initialize")
         for payload, message in ((b'\xff\n',"UTF-8"),(b'{\n',"JSON"),(b'{}\n',"envelope")):

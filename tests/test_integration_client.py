@@ -1,13 +1,13 @@
 """Offline orchestration tests using an injected fake process."""
 from __future__ import annotations
-import json, os, stat, subprocess, sys, tempfile, threading, unittest
+import json, os, signal, stat, subprocess, sys, tempfile, threading, unittest
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from codex_wsl_rpc.integration import IntegrationAuthorization, IntegrationError, ReadOnlyProjectListClient
 from codex_wsl_rpc.integration.client import (CleanupError, InvalidTargetError,
     OperatorCancelledError, PINNED_CODEX_SHA, StartupError,
-    UnsupportedPlatformError, _OwnedChildCleanup)
+    UnsupportedPlatformError, _OwnedChildCleanup, _SignalDelivery)
 from codex_wsl_rpc.integration.transport import TransportError
 from codex_wsl_rpc.protocol import SuccessResponse
 
@@ -28,7 +28,9 @@ class FakeProcess:
             while response_index < len(responses):
                 request=json.loads(source.readline()); self.requests.append(request)
                 if "id" in request:
-                    sink.write(json.dumps(responses[response_index]).encode()+b"\n")
+                    response = dict(responses[response_index])
+                    response["id"] = request["id"]
+                    sink.write(json.dumps(response).encode()+b"\n")
                     response_index += 1
             source.close(); sink.close()
         self.thread=threading.Thread(target=server); self.thread.start()
@@ -76,8 +78,9 @@ class ScriptedTransport:
     def send(self, message, deadline): self._advance()
     def receive_response(self, request_id, deadline):
         self._advance()
-        if request_id == 1:
-            return SuccessResponse(1, {"userAgent":"private", "codexHome":"/private", "platformFamily":"unix", "platformOs":"linux"})
+        if self.step <= 2:
+            return SuccessResponse(request_id, {"userAgent":"private", "codexHome":"/private", "platformFamily":"unix", "platformOs":"linux"})
+        return SuccessResponse(request_id, {"data": [], "nextCursor": None})
     def close(self): pass
 
 def project(name="secret", roots=None):
@@ -89,10 +92,13 @@ class ClientTests(unittest.TestCase):
     def tearDown(self): self.temp.cleanup()
     def _client(self, **kwargs):
         proc_reader=kwargs.pop("_proc_reader", lambda path: "5.15.90.1-MICROSOFT-standard-WSL2")
+        request_ids = iter(("init-test-id", "list-test-id"))
+        id_generator = kwargs.pop("_id_generator", lambda: next(request_ids))
         return ReadOnlyProjectListClient(
             executable_path=self.exe, home_path=self.home,
             authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,
             _proc_reader=proc_reader,
+            _id_generator=id_generator,
             **kwargs,
         )
     def _run(self,data,next_cursor=None,codex_home="/private",
@@ -103,7 +109,7 @@ class ClientTests(unittest.TestCase):
     def test_success_exact_sequence_and_safe_summary(self):
         result,fake=self._run([project(roots=[{"path":"/home/person/private"}])],"raw-cursor")
         self.assertEqual([r.get("method") for r in fake.requests],["initialize","initialized","project/list"])
-        self.assertEqual([r.get("id") for r in fake.requests],[1,None,2]); self.assertTrue(fake.requests[0]["params"]["capabilities"]["experimentalApi"])
+        self.assertEqual([r.get("id") for r in fake.requests],["init-test-id",None,"list-test-id"]); self.assertTrue(fake.requests[0]["params"]["capabilities"]["experimentalApi"])
         self.assertEqual(fake.requests[2]["params"],{"cursor":None,"limit":25,"sortKey":"position","sortDirection":"asc"})
         safe=json.dumps(result.summary.to_safe_dict()); self.assertNotIn("secret",safe); self.assertNotIn("private-id",safe); self.assertNotIn("raw-cursor",safe)
         self.assertNotIn(str(self.exe), safe); self.assertNotIn(str(self.home), safe)
@@ -122,6 +128,29 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(summary[field], "NOT_ESTABLISHED")
         self.assertFalse(summary["direct_state_inspection"])
         self.assertFalse(summary["mutation_attempted"])
+
+    def test_request_ids_are_distinct_injected_unpredictable_strings(self):
+        result, fake = self._run([])
+        ids = [request["id"] for request in fake.requests if "id" in request]
+        self.assertEqual(ids, ["init-test-id", "list-test-id"])
+        self.assertEqual(len(set(ids)), 2)
+        self.assertTrue(all(isinstance(request_id, str) for request_id in ids))
+        self.assertIsNotNone(result.summary)
+
+    def test_spawn_handoff_defers_pending_interrupt_until_child_is_owned(self):
+        fake = CleanupProcess([0])
+        masks = []
+        def sigmask(operation, signals):
+            masks.append((operation, signals))
+            if operation == signal.SIG_SETMASK:
+                raise KeyboardInterrupt()
+            return frozenset()
+        client = self._client(_popen=lambda *a, **k: fake, _sigmask=sigmask)
+        with self.assertRaises(OperatorCancelledError):
+            client.list_one_page()
+        fake.stdin.close.assert_called_once_with()
+        self.assertEqual([operation for operation, _ in masks],
+                         [signal.SIG_BLOCK, signal.SIG_SETMASK])
 
     def test_platform_values_are_reduced_to_safe_reviewed_categories(self):
         cases = (
@@ -144,38 +173,24 @@ class ClientTests(unittest.TestCase):
                 if expected_os == "unknown" and os_name:
                     self.assertNotIn(os_name, rendered)
 
-    def test_executable_identity_is_rechecked_immediately_before_launch(self):
-        actual = os.lstat(self.exe)
-        changed = {
-            "inode": (actual.st_dev, actual.st_ino + 1, actual.st_mode),
-            "device": (actual.st_dev + 1, actual.st_ino, actual.st_mode),
-            "symlink": (actual.st_dev, actual.st_ino, stat.S_IFLNK | 0o777),
-            "non_regular": (actual.st_dev, actual.st_ino, stat.S_IFDIR | 0o755),
-            "not_executable": (actual.st_dev, actual.st_ino, stat.S_IFREG | 0o600),
-        }
-        for label, (device, inode, mode) in changed.items():
-            with self.subTest(label=label):
-                replacement = mock.Mock(st_dev=device, st_ino=inode, st_mode=mode)
-                observations = iter((actual, replacement))
-                popen = mock.Mock()
-                client = self._client(_lstat=lambda path: next(observations), _popen=popen)
-                with self.assertRaisesRegex(InvalidTargetError,
-                                            "^target identity changed before execution$") as caught:
-                    client.list_one_page()
-                self.assertNotIn(str(self.exe), str(caught.exception))
-                popen.assert_not_called()
-
-        observations = iter((actual, OSError("gone")))
-        popen = mock.Mock()
-        client = self._client(
-            _lstat=lambda path: (lambda value: (_ for _ in ()).throw(value)
-                                 if isinstance(value, BaseException) else value)(next(observations)),
-            _popen=popen,
-        )
-        with self.assertRaisesRegex(InvalidTargetError,
-                                    "^target identity changed before execution$"):
-            client.list_one_page()
-        popen.assert_not_called()
+    def test_descriptor_backed_launch_executes_retained_validated_object(self):
+        observed = {}
+        fake = FakeProcess([{"id": 1, "result": {"userAgent": "private", "codexHome": "/private", "platformFamily": "unix", "platformOs": "linux"}},
+                            {"id": 2, "result": {"data": [], "nextCursor": None}}])
+        def popen(argv, **kwargs):
+            replacement = self.exe.with_suffix(".new")
+            replacement.write_bytes(b"replacement")
+            os.replace(replacement, self.exe)
+            observed["bytes"] = Path(argv[0]).read_bytes()
+            observed["argv"] = argv
+            observed["pass_fds"] = kwargs["pass_fds"]
+            return fake
+        result = self._client(_popen=popen).list_one_page()
+        self.assertEqual(observed["bytes"], b"\x7fELFfake")
+        self.assertRegex(observed["argv"][0], r"^/proc/self/fd/\d+$")
+        self.assertEqual(len(observed["pass_fds"]), 1)
+        with self.assertRaises(OSError): os.fstat(observed["pass_fds"][0])
+        self.assertEqual(result.summary.target_revision_mapping, "NOT_ESTABLISHED")
 
     def test_unchanged_executable_identity_allows_fake_launch(self):
         actual = os.lstat(self.exe)
@@ -396,8 +411,27 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(OperatorCancelledError):
             self._client()._cleanup(state)
         self.assertTrue(state.completed)
+        self.assertEqual(process.terminate.call_count, 2)
+        self.assertEqual(process.kill.call_count, 0)
+        self.assertIs(state.terminate_state, _SignalDelivery.DELIVERY_UNCERTAIN)
+        self.assertIs(state.kill_state, _SignalDelivery.NOT_ATTEMPTED)
+
+    def test_uncertain_signal_delivery_is_bounded_and_reconciled(self):
+        process = CleanupProcess([
+            subprocess.TimeoutExpired("fake", 1),
+            subprocess.TimeoutExpired("fake", 1),
+            subprocess.TimeoutExpired("fake", 1),
+            0,
+        ])
+        process.kill.side_effect = (KeyboardInterrupt(), None)
+        state = _OwnedChildCleanup(process, None)
+        with self.assertRaises(OperatorCancelledError):
+            self._client()._cleanup(state)
         process.terminate.assert_called_once_with()
-        process.kill.assert_called_once_with()
+        self.assertEqual(process.kill.call_count, 2)
+        self.assertIs(state.terminate_state, _SignalDelivery.DELIVERED)
+        self.assertIs(state.kill_state, _SignalDelivery.DELIVERED)
+        self.assertTrue(state.completed)
 
     def test_cleanup_failure_precedes_deferred_clock_cancellation(self):
         clock = ScriptedClock([
