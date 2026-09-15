@@ -40,7 +40,9 @@ real product process, and does not change the `MOCK_ONLY` capability or `NONE`
 mutation authorization. `GATE-002` remains `UNSATISFIED`; the policy
 clarification alone does not establish `READ_ONLY` capability.
 
-Subdivision 2.3 remains `FUTURE` and separately human-gated for implementation
+Subdivision 2.3 is `IN PROGRESS`: Cloud/offline implementation is `COMPLETE`
+and local WSL validation is `PENDING`. Capability remains `MOCK_ONLY`, mutation
+authorization remains `NONE`, and `GATE-002` remains `UNSATISFIED`. It is separately human-gated for real execution
 and real validation of read-only `project/list`. A future review may consider
 an explicit operator-selected WSL Codex/app-server executable, stdio only,
 `initialize`, the `initialized` notification, `project/list`, and real local

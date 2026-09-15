@@ -421,6 +421,11 @@ human approval; those process controls are not intrinsic GATE-001 rows.
 
 ## Open questions and explicit non-goals
 
+The Phase A integration consumes only the pinned server notifications
+`configWarning` and `remoteControl/status/changed`, with bounded counts/bytes
+and discarded payloads. This narrow handling does not establish that either
+notification will occur in an installed build.
+
 Open integration questions are the Desktop-owned endpoint/process, selected
 state root, installed-build mapping, startup writes, and cross-platform path
 round-tripping. They constrain Subdivision 2.3 but do not block completion of

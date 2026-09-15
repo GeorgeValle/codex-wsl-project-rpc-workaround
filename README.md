@@ -2,8 +2,8 @@
 
 > **Experimental and unofficial.** This project is not affiliated with or
 > endorsed by OpenAI. The repository has a deterministic **mock-only** protocol
-> capability, but contains **no real Codex workaround** and performs no real
-> Codex RPC operations.
+> capability. It contains a separately gated, unexercised read-only integration
+> path, but has performed no real Codex RPC operations.
 
 ## Project purpose
 
@@ -11,8 +11,9 @@ This repository explores a possible workaround for a Codex Desktop regression
 observed by a Windows + WSL user. Its long-term goal is safe, auditable
 management of Codex Desktop Projects while the WSL backend remains enabled.
 The mock transport, server, and client exercise synthetic Project fixtures
-without accessing Desktop or user state. No real integration or mutation
-capability exists.
+without accessing Desktop or user state. The gated one-page integration is
+documented in [`docs/integration/read-only-project-list.md`](docs/integration/read-only-project-list.md);
+local validation and all mutation remain unauthorized.
 
 ## Incident that motivated the project
 

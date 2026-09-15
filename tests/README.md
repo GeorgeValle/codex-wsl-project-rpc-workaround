@@ -33,3 +33,9 @@ editable-build metadata in the original source tree.
 
 Both commands are development validation. They provide no Codex integration,
 transport, RPC, network, state, or mutation capability.
+
+The ordinary suite also exercises the gated integration entirely with fake
+processes and owned pipes. `test_integration_transport.py`,
+`test_integration_client.py`, and `test_integration_safety.py` never launch
+Codex. The operator runner under `tools/` is outside unittest discovery and
+requires separate human authorization; do not invoke it as a test.
