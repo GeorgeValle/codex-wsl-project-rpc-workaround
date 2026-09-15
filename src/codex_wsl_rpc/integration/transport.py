@@ -26,6 +26,7 @@ class TransportError(RuntimeError):
 
 
 class _StreamTransport:
+    _supports_terminal_drain = True
     def __init__(self, process, *, clock: Callable[[], float] = time.monotonic,
                  selector_factory=selectors.DefaultSelector) -> None:
         self._process = process
@@ -39,6 +40,8 @@ class _StreamTransport:
         self._notification_bytes = 0
         self._outstanding_request_id: RequestId | None = None
         self._unusable = False
+        self._stdout_eof = False
+        self._terminal_error: TransportError | None = None
         for stream, event in ((process.stdout, "stdout"), (process.stderr, "stderr")):
             os.set_blocking(stream.fileno(), False)
             self._selector.register(stream, selectors.EVENT_READ, event)
@@ -46,6 +49,92 @@ class _StreamTransport:
 
     def close(self) -> None:
         self._selector.close()
+
+    @property
+    def terminal_error(self) -> TransportError | None:
+        return self._terminal_error
+
+    def drain_terminal(self, process, deadline: float) -> tuple[bool, bool]:
+        """Drain and validate output through stdout EOF while observing child exit."""
+        self._unusable = True
+        while True:
+            self._validate_terminal_frames()
+            reaped = self._process_reaped(process)
+            if reaped and self._stdout_eof:
+                return True, True
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                return reaped, self._stdout_eof
+            events = self._selector.select(remaining)
+            if not events:
+                return self._process_reaped(process), self._stdout_eof
+            for key, _ in events:
+                try:
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                if key.data == "stderr":
+                    self._consume_stderr(key.fileobj, chunk)
+                else:
+                    self._consume_terminal_stdout(key.fileobj, chunk)
+
+    @staticmethod
+    def _process_reaped(process) -> bool:
+        poll = getattr(process, "poll", None)
+        return poll() is not None if callable(poll) else process.returncode is not None
+
+    def _consume_stderr(self, stream, chunk: bytes) -> None:
+        if not chunk:
+            try: self._selector.unregister(stream)
+            except (KeyError, ValueError): pass
+            return
+        self._stderr_total += len(chunk)
+        if self._stderr_total > MAX_STDERR_TOTAL:
+            self._remember_terminal_error(TransportError("stderr resource limit"))
+        room = MAX_STDERR_RETAINED - len(self._stderr)
+        self._stderr.extend(chunk[:max(0, room)])
+
+    def _consume_terminal_stdout(self, stream, chunk: bytes) -> None:
+        if not chunk:
+            try: self._selector.unregister(stream)
+            except (KeyError, ValueError): pass
+            self._stdout_eof = True
+            if self._buffer:
+                self._remember_terminal_error(TransportError("EOF with incomplete frame"))
+                self._buffer.clear()
+            return
+        self._stdout_total += len(chunk)
+        if self._stdout_total > MAX_STDOUT_SESSION:
+            self._remember_terminal_error(TransportError("stdout session limit"))
+        self._buffer.extend(chunk)
+        if b"\n" not in self._buffer and len(self._buffer) > MAX_STDOUT_FRAME:
+            self._remember_terminal_error(TransportError("stdout frame limit"))
+            self._buffer.clear()
+
+    def _validate_terminal_frames(self) -> None:
+        while (frame := self._take_frame_safely()) is not None:
+            try:
+                envelope = self._decode(frame)
+                if isinstance(envelope, Notification):
+                    self._accept_notification(envelope, len(frame))
+                elif isinstance(envelope, Request):
+                    raise TransportError("unexpected server request")
+                else:
+                    raise TransportError("response correlation error")
+            except TransportError as error:
+                self._remember_terminal_error(error)
+
+    def _take_frame_safely(self) -> bytes | None:
+        try:
+            return self._take_frame()
+        except TransportError as error:
+            self._remember_terminal_error(error)
+            self._buffer.clear()
+            return None
+
+    def _remember_terminal_error(self, error: TransportError) -> None:
+        if self._terminal_error is None:
+            self._terminal_error = error
 
     def send(self, envelope: Request | Notification, deadline: float) -> None:
         if self._unusable:
@@ -166,6 +255,7 @@ class _StreamTransport:
                     self._stderr.extend(chunk[:max(0, room)])
                 elif not chunk:
                     self._selector.unregister(key.fileobj)
+                    self._stdout_eof = True
                     if self._buffer:
                         raise TransportError(incomplete_message)
                     if reject_eof:

@@ -26,6 +26,8 @@ PROJECT_LIST_TIMEOUT = 10.0
 CLOSE_TIMEOUT = 2.0
 TERMINATE_TIMEOUT = 2.0
 KILL_TIMEOUT = 2.0
+CLEANUP_TOTAL_TIMEOUT = CLOSE_TIMEOUT + TERMINATE_TIMEOUT + KILL_TIMEOUT
+MAX_MASK_ACQUISITION_ATTEMPTS = 4
 
 class IntegrationAuthorization(Enum):
     READ_ONLY_PROJECT_LIST = (
@@ -100,9 +102,14 @@ class _OwnedChildCleanup:
     terminate_attempts: int = 0
     kill_attempts: int = 0
     interrupted: bool = False
+    protection_failed: bool = False
 
 @dataclass(frozen=True, slots=True)
 class _ValidatedExecutable:
+    fd: int
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedHome:
     fd: int
 
 def _path_category(path: str) -> str:
@@ -156,7 +163,7 @@ class ReadOnlyProjectListClient:
                 return True
         return False
 
-    def _validate(self) -> _ValidatedExecutable:
+    def _validate(self) -> tuple[_ValidatedExecutable, _ValidatedHome]:
         if self._authorization is not IntegrationAuthorization.READ_ONLY_PROJECT_LIST:
             raise AuthorizationError("explicit read-only authorization is missing")
         if not self._is_wsl():
@@ -198,10 +205,36 @@ class ReadOnlyProjectListClient:
         if header != b"\x7fELF":
             os.close(fd)
             raise UnsupportedTargetError("target must be the reviewed concrete native executable")
-        if not self._home_path.is_absolute() or not self._home_path.is_dir():
+        try:
+            home = self._validate_home()
+        except Exception:
             os.close(fd)
+            raise
+        return _ValidatedExecutable(fd), home
+
+    def _validate_home(self) -> _ValidatedHome:
+        if not self._home_path.is_absolute():
             raise InvalidTargetError("home must be an existing absolute directory")
-        return _ValidatedExecutable(fd)
+        flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+                 getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0))
+        fd = None
+        try:
+            path_status = self._lstat(self._home_path)
+            if stat.S_ISLNK(path_status.st_mode) or not stat.S_ISDIR(path_status.st_mode):
+                raise InvalidTargetError("home must be an existing absolute directory")
+            fd = os.open(self._home_path, flags)
+            opened_status = os.fstat(fd)
+            if (not stat.S_ISDIR(opened_status.st_mode) or
+                    (path_status.st_dev, path_status.st_ino) !=
+                    (opened_status.st_dev, opened_status.st_ino)):
+                raise InvalidTargetError("home identity changed during validation")
+            return _ValidatedHome(fd)
+        except Exception as error:
+            if fd is not None:
+                os.close(fd)
+            if isinstance(error, InvalidTargetError):
+                raise
+            raise InvalidTargetError("home could not be validated") from error
 
     def _next_request_id(self, used: set[str]) -> str:
         request_id = self._id_generator()
@@ -211,7 +244,7 @@ class ReadOnlyProjectListClient:
         return request_id
 
     def list_one_page(self) -> ProjectListRunResult:
-        executable = self._validate()
+        executable, home = self._validate()
         process = transport = None
         owned_child = None
         cleanup = "not_started"
@@ -224,9 +257,9 @@ class ReadOnlyProjectListClient:
                     process = self._popen(
                     [f"/proc/self/fd/{executable.fd}", "app-server", "--listen", "stdio://"],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    env={"HOME": str(self._home_path), "PATH": os.defpath,
+                    env={"HOME": f"/proc/self/fd/{home.fd}", "PATH": os.defpath,
                          "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}, shell=False,
-                    bufsize=0, close_fds=True, pass_fds=(executable.fd,),
+                    bufsize=0, close_fds=True, pass_fds=(executable.fd, home.fd),
                     )
                     owned_child = _OwnedChildCleanup(process, None)
                 finally:
@@ -235,6 +268,7 @@ class ReadOnlyProjectListClient:
                 raise StartupError("app-server startup failed") from error
             finally:
                 os.close(executable.fd)
+                os.close(home.fd)
             # Popen transfers ownership of this exact child immediately.  Keep
             # that ownership even if transport initialization only partially
             # succeeds and raises.
@@ -254,7 +288,9 @@ class ReadOnlyProjectListClient:
                 raise InitializeError("initialize protocol error")
             if not isinstance(response, SuccessResponse):
                 raise InitializeError("initialize protocol error")
-            try: initialized = InitializeResponse.from_wire(response.result)
+            try:
+                self._validate_initialize_result(response.result)
+                initialized = InitializeResponse.from_wire(response.result)
             except ValueError as error: raise InitializeError("initialize protocol error") from error
             phase = "initialized_send"
             transport.send(Notification("initialized"), init_deadline)
@@ -270,11 +306,15 @@ class ReadOnlyProjectListClient:
                 safe_code = "project_list_unavailable" if response.error.code == -32601 else None
                 raise ProjectListError(category, category=safe_code)
             if not isinstance(response, SuccessResponse): raise ProjectListError("project/list protocol error")
-            try: page = ProjectListResponse.from_wire(response.result)
+            try:
+                self._validate_project_list_result(response.result)
+                page = ProjectListResponse.from_wire(response.result)
             except ValueError as error: raise ProjectListError("project/list protocol error") from error
             categories = tuple(sorted({_path_category(root.path) for project in page.data for root in project.roots}))
             phase = "cleanup"
             cleanup = self._cleanup(owned_child)
+            if transport.terminal_error is not None:
+                raise transport.terminal_error
             process = transport = None
             summary = ProjectListRunSummary(PINNED_CODEX_SHA, datetime.now(timezone.utc).isoformat(),
                 "operator_confirmed_openai_codex_unverified_by_repository", "NOT_ESTABLISHED",
@@ -292,14 +332,28 @@ class ReadOnlyProjectListClient:
                 category=f"{category.replace('/', '_')}_transport_failure",
             ) from error
         finally:
-            if owned_child is not None and not owned_child.started:
+            if (owned_child is not None and not owned_child.started and
+                    not owned_child.protection_failed):
                 self._cleanup(owned_child)
 
     def _cleanup(self, owned_child: _OwnedChildCleanup) -> str:
         """Finish one bounded cleanup lifecycle, deferring Ctrl+C until reap."""
         deferred_during_mask = False
-        while True:
+        cleanup_deadline = None
+        for _ in range(MAX_MASK_ACQUISITION_ATTEMPTS):
             try:
+                cleanup_deadline = self._clock() + CLEANUP_TOTAL_TIMEOUT
+                break
+            except KeyboardInterrupt:
+                deferred_during_mask = True
+        if cleanup_deadline is None:
+            owned_child.protection_failed = True
+            raise CleanupError("owned-child cleanup protection failed")
+        previous_mask = None
+        for _ in range(MAX_MASK_ACQUISITION_ATTEMPTS):
+            try:
+                if self._clock() >= cleanup_deadline:
+                    break
                 previous_mask = self._sigmask(signal.SIG_BLOCK, {signal.SIGINT})
                 break
             except KeyboardInterrupt:
@@ -308,7 +362,11 @@ class ReadOnlyProjectListClient:
                 # retried before the lifecycle is marked as started.
                 deferred_during_mask = True
             except Exception as error:
+                owned_child.protection_failed = True
                 raise CleanupError("owned-child cleanup protection failed") from error
+        if previous_mask is None:
+            owned_child.protection_failed = True
+            raise CleanupError("owned-child cleanup protection failed")
         if deferred_during_mask:
             owned_child.interrupted = True
         terminal_error: CleanupError | None = None
@@ -332,7 +390,8 @@ class ReadOnlyProjectListClient:
                 try:
                     if state == "transport_close":
                         state = "stdin_close"
-                        if transport is not None:
+                        if (transport is not None and
+                                getattr(transport, "_supports_terminal_drain", False) is not True):
                             try: transport.close()
                             except Exception: failures.append("transport")
                     elif state == "stdin_close":
@@ -340,7 +399,7 @@ class ReadOnlyProjectListClient:
                         try: process.stdin.close()
                         except Exception: failures.append("stdin")
                     elif state == "deadline":
-                        deadline = self._clock() + stage_timeout
+                        deadline = min(cleanup_deadline, self._clock() + stage_timeout)
                         state = "wait"
                     elif state == "wait":
                         remaining = deadline - self._clock()
@@ -348,8 +407,20 @@ class ReadOnlyProjectListClient:
                             reaped = process.returncode is not None
                         else:
                             try:
-                                process.wait(timeout=remaining)
-                                reaped = True
+                                if getattr(transport, "_supports_terminal_drain", False) is True:
+                                    child_reaped, stdout_eof = transport.drain_terminal(process, deadline)
+                                    reaped = child_reaped and stdout_eof
+                                    if child_reaped and not stdout_eof:
+                                        if self._clock() >= cleanup_deadline:
+                                            failures.append("stdout_eof")
+                                            state = "finalize"
+                                        else:
+                                            deadline = cleanup_deadline
+                                            state = "wait"
+                                        continue
+                                else:
+                                    process.wait(timeout=remaining)
+                                    reaped = True
                             except subprocess.TimeoutExpired:
                                 reaped = False
                             except Exception:
@@ -395,6 +466,8 @@ class ReadOnlyProjectListClient:
                             owned_child.completed = True
                             owned_child.process = None
                             owned_child.transport = None
+                        if getattr(transport, "_supports_terminal_drain", False) is True:
+                            transport.close()
                         state = "terminal"
                 except KeyboardInterrupt:
                     owned_child.interrupted = True
@@ -405,8 +478,36 @@ class ReadOnlyProjectListClient:
                 self._sigmask(signal.SIG_SETMASK, previous_mask)
             except KeyboardInterrupt:
                 owned_child.interrupted = True
+            except Exception:
+                terminal_error = CleanupError("owned-child cleanup protection failed")
         if terminal_error is not None:
             raise terminal_error
         if owned_child.interrupted:
             raise OperatorCancelledError("operator cancelled")
         return outcome
+
+    @staticmethod
+    def _validate_initialize_result(value: object) -> None:
+        if not isinstance(value, dict) or any(
+                key not in value for key in
+                ("userAgent", "codexHome", "platformFamily", "platformOs")):
+            raise ValueError("invalid initialize shape")
+
+    @staticmethod
+    def _validate_project_list_result(value: object) -> None:
+        if not isinstance(value, dict) or any(key not in value for key in ("data", "nextCursor")):
+            raise ValueError("invalid project/list shape")
+        data = value["data"]
+        if not isinstance(data, list):
+            raise ValueError("invalid project/list shape")
+        project_members = ("id", "name", "roots", "metadata", "position",
+                           "createdAt", "updatedAt", "recencyAt")
+        for project in data:
+            if not isinstance(project, dict) or any(key not in project for key in project_members):
+                raise ValueError("invalid project/list shape")
+            roots = project["roots"]
+            if not isinstance(roots, list):
+                raise ValueError("invalid project/list shape")
+            for root in roots:
+                if not isinstance(root, dict) or "path" not in root:
+                    raise ValueError("invalid project/list shape")

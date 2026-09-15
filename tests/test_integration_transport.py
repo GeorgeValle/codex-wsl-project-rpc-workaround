@@ -289,4 +289,57 @@ class TransportTests(unittest.TestCase):
         frame = json.dumps({"id": 1, "result": nested}).encode()
         self.assertIsInstance(self.transport._decode(frame), SuccessResponse)
 
+    def test_terminal_drain_validates_frames_through_stdout_eof(self):
+        cases = (
+            (b'{"id":"extra","result":{}}\n', "correlation"),
+            (b'{\n', "JSON"),
+            (b'{', "incomplete"),
+            (b'{"method":"not/allowed"}\n', "notification"),
+        )
+        for payload, message in cases:
+            with self.subTest(message=message):
+                process = _Process(); process.returncode = 0; process.poll = lambda: 0
+                transport = _StreamTransport(process)
+                try:
+                    os.write(process.stdout_writer, payload); os.close(process.stdout_writer)
+                    reaped, eof = transport.drain_terminal(process, time.monotonic()+1)
+                    self.assertTrue(reaped); self.assertTrue(eof)
+                    self.assertRegex(str(transport.terminal_error), message)
+                finally:
+                    transport.close(); process.stdin.close(); process.stdout.close(); process.stderr.close(); process.close()
+
+    def test_terminal_drain_allows_notification_and_requires_reap_and_eof(self):
+        self.process.returncode = 0; self.process.poll = lambda: 0
+        os.write(self.process.stdout_writer, b'{"method":"configWarning","params":{}}\n')
+        os.close(self.process.stdout_writer)
+        self.assertEqual(self.transport.drain_terminal(self.process, time.monotonic()+1),
+                         (True, True))
+        self.assertIsNone(self.transport.terminal_error)
+        self.assertEqual(self.transport._notifications, 1)
+
+        process = _Process(); process.returncode = 0; process.poll = lambda: 0
+        transport = _StreamTransport(process)
+        try:
+            self.assertEqual(transport.drain_terminal(process, time.monotonic()),
+                             (True, False))
+        finally:
+            transport.close(); process.stdin.close(); process.stdout.close(); process.stderr.close(); process.close()
+
+        process = _Process(); process.returncode = None; process.poll = lambda: None
+        transport = _StreamTransport(process)
+        try:
+            os.close(process.stdout_writer)
+            self.assertEqual(transport.drain_terminal(process, time.monotonic()+0.01),
+                             (False, True))
+        finally:
+            transport.close(); process.stdin.close(); process.stdout.close(); process.stderr.close(); process.close()
+
+    def test_terminal_stdout_limit_is_recorded_while_cleanup_can_continue(self):
+        self.process.returncode = 0; self.process.poll = lambda: 0
+        with mock.patch("codex_wsl_rpc.integration.transport.MAX_STDOUT_SESSION", 4):
+            os.write(self.process.stdout_writer, b'12345\n'); os.close(self.process.stdout_writer)
+            self.assertEqual(self.transport.drain_terminal(self.process, time.monotonic()+1),
+                             (True, True))
+        self.assertRegex(str(self.transport.terminal_error), "stdout session limit")
+
 if __name__ == "__main__": unittest.main()

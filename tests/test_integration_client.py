@@ -36,6 +36,10 @@ class FakeProcess:
             source.close(); sink.close()
         self.thread=threading.Thread(target=server); self.thread.start()
     def wait(self,timeout): self.thread.join(timeout); return 0
+    def poll(self):
+        if self.thread.is_alive(): return None
+        self.returncode = 0
+        return 0
     def terminate(self): pass
     def kill(self): pass
 
@@ -54,10 +58,11 @@ class FakeClock:
     def __call__(self): return self.now
 
 class ScriptedClock:
-    def __init__(self, values): self.values = iter(values)
+    def __init__(self, values): self.values = iter(values); self.last = 0.0
     def __call__(self):
-        value = next(self.values)
+        value = next(self.values, self.last)
         if isinstance(value, BaseException): raise value
+        self.last = value
         return value
 
 class TimedCleanupProcess(CleanupProcess):
@@ -190,9 +195,66 @@ class ClientTests(unittest.TestCase):
         result = self._client(_popen=popen).list_one_page()
         self.assertEqual(observed["bytes"], b"\x7fELFfake")
         self.assertRegex(observed["argv"][0], r"^/proc/self/fd/\d+$")
-        self.assertEqual(len(observed["pass_fds"]), 1)
-        with self.assertRaises(OSError): os.fstat(observed["pass_fds"][0])
+        self.assertEqual(len(observed["pass_fds"]), 2)
+        self.assertEqual(observed["argv"][0], f"/proc/self/fd/{observed['pass_fds'][0]}")
+        self.assertRegex(fake.requests[0].get("method", ""), "initialize")
+        for inherited_fd in observed["pass_fds"]:
+            with self.assertRaises(OSError): os.fstat(inherited_fd)
         self.assertEqual(result.summary.target_revision_mapping, "NOT_ESTABLISHED")
+
+    def test_home_uses_retained_directory_identity_after_rename_and_recreate(self):
+        observed = {}
+        fake = FakeProcess([
+            {"result":{"userAgent":"private","codexHome":"/private","platformFamily":"unix","platformOs":"linux"}},
+            {"result":{"data":[],"nextCursor":None}},
+        ])
+        original = self.home.with_name("authorized-home")
+        def popen(argv, **kwargs):
+            self.home.rename(original)
+            self.home.mkdir()
+            home_fd = kwargs["pass_fds"][1]
+            observed["home_fd"] = home_fd
+            observed["home_env"] = kwargs["env"]["HOME"]
+            observed["identity"] = (os.stat(kwargs["env"]["HOME"]).st_dev,
+                                    os.stat(kwargs["env"]["HOME"]).st_ino)
+            observed["authorized"] = (os.stat(original).st_dev, os.stat(original).st_ino)
+            observed["replacement"] = (os.stat(self.home).st_dev, os.stat(self.home).st_ino)
+            return fake
+        self._client(_popen=popen).list_one_page()
+        self.assertEqual(observed["home_env"], f"/proc/self/fd/{observed['home_fd']}")
+        self.assertEqual(observed["identity"], observed["authorized"])
+        self.assertNotEqual(observed["identity"], observed["replacement"])
+        with self.assertRaises(OSError): os.fstat(observed["home_fd"])
+
+    def test_home_symlink_and_non_directory_fail_closed(self):
+        target = self.home.with_name("target-home")
+        self.home.rename(target)
+        self.home.symlink_to(target, target_is_directory=True)
+        with self.assertRaises(InvalidTargetError): self._client()._validate()
+        self.home.unlink(); self.home.write_text("not a directory")
+        with self.assertRaises(InvalidTargetError): self._client()._validate()
+
+    def test_strict_integration_shapes_require_every_serialized_member(self):
+        initialize = {"userAgent":"ua","codexHome":"/home","platformFamily":"unix","platformOs":"linux"}
+        for key in tuple(initialize):
+            invalid = dict(initialize); invalid.pop(key)
+            with self.subTest(structure="initialize", key=key), self.assertRaises(ValueError):
+                self._client()._validate_initialize_result(invalid)
+        valid_project = project(roots=[{"path":"/root"}])
+        response = {"data":[valid_project], "nextCursor":None}
+        for key in ("data", "nextCursor"):
+            invalid = dict(response); invalid.pop(key)
+            with self.subTest(structure="response", key=key), self.assertRaises(ValueError):
+                self._client()._validate_project_list_result(invalid)
+        for key in tuple(valid_project):
+            invalid_project = dict(valid_project); invalid_project.pop(key)
+            with self.subTest(structure="project", key=key), self.assertRaises(ValueError):
+                self._client()._validate_project_list_result({"data":[invalid_project],"nextCursor":None})
+        with self.assertRaises(ValueError):
+            self._client()._validate_project_list_result(
+                {"data":[project(roots=[{}])],"nextCursor":None})
+        self._client()._validate_project_list_result(response)
+        self.assertIsNone(valid_project["recencyAt"])
 
     def test_unchanged_executable_identity_allows_fake_launch(self):
         actual = os.lstat(self.exe)
@@ -393,6 +455,28 @@ class ClientTests(unittest.TestCase):
         self.assertEqual([event[0] for event in events],
                          [signal.SIG_BLOCK, signal.SIG_SETMASK])
 
+    def test_cleanup_mask_acquisition_has_fixed_bound_and_one_deadline(self):
+        clock = mock.Mock(return_value=0.0)
+        sigmask = mock.Mock(side_effect=KeyboardInterrupt())
+        state = _OwnedChildCleanup(CleanupProcess([0]), None)
+        with self.assertRaisesRegex(CleanupError, "protection failed"):
+            self._client(_clock=clock, _sigmask=sigmask)._cleanup(state)
+        self.assertEqual(sigmask.call_count, 4)
+        self.assertFalse(state.started)
+        self.assertFalse(state.completed)
+        self.assertTrue(state.protection_failed)
+        # One deadline origin plus one non-resetting bound check per attempt.
+        self.assertEqual(clock.call_count, 5)
+
+    def test_cleanup_mask_acquisition_respects_cleanup_wide_deadline(self):
+        clock = ScriptedClock([0.0, 7.0])
+        sigmask = mock.Mock()
+        state = _OwnedChildCleanup(CleanupProcess([0]), None)
+        with self.assertRaisesRegex(CleanupError, "protection failed"):
+            self._client(_clock=clock, _sigmask=sigmask)._cleanup(state)
+        sigmask.assert_not_called()
+        self.assertTrue(state.protection_failed)
+
     def test_cleanup_restores_mask_before_deferred_cancel_and_after_failure(self):
         for waits, expected in (([0], OperatorCancelledError),
                                 ([subprocess.TimeoutExpired("fake", 1)] * 3, CleanupError)):
@@ -427,6 +511,12 @@ class ClientTests(unittest.TestCase):
             if calls == 1: raise subprocess.TimeoutExpired("fake", timeout)
             return original_wait(timeout)
         fake.wait=wait
+        terminated = False
+        fake.poll = lambda: 0 if terminated else None
+        def terminate():
+            nonlocal terminated
+            terminated = True
+        fake.terminate = mock.Mock(side_effect=terminate)
         client=self._client(_popen=lambda *a,**k: fake)
         self.assertEqual(client.list_one_page().summary.cleanup_outcome, "terminated_owned_child")
 
