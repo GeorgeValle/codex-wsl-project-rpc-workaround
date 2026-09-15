@@ -70,6 +70,19 @@ class TransportTests(unittest.TestCase):
         with self.assertRaisesRegex(TransportError, "correlation"):
             self._send_request(2, "project/list")
 
+    def test_pipe_buffered_future_response_is_rejected_before_request(self):
+        self._send_request(1, "initialize")
+        os.write(self.process.stdout_writer, b'{"id":1,"result":{}}\n')
+        self.assertIsInstance(self.transport.receive_response(1, time.monotonic()+10), SuccessResponse)
+        self.assertFalse(self.transport._buffer)
+        os.write(self.process.stdout_writer, b'{"id":2,"result":{}}\n')
+        with self.assertRaisesRegex(TransportError, "^response correlation error$"):
+            self.transport.send(Request(2, "project/list", {}), time.monotonic()+10)
+        self.assertIsNone(self.transport._outstanding_request_id)
+        os.set_blocking(self.process.stdin_reader, False)
+        with self.assertRaises(BlockingIOError):
+            os.read(self.process.stdin_reader, 4096)
+
     def test_duplicate_response_cannot_survive_until_next_request(self):
         self._send_request(1, "initialize")
         os.write(self.process.stdout_writer, b'{"id":1,"result":{}}\n{"id":1,"result":{}}\n')
@@ -95,6 +108,43 @@ class TransportTests(unittest.TestCase):
         self._send_request(2, "project/list")
         os.write(self.process.stdout_writer, b'{"id":2,"result":{}}\n')
         self.assertIsInstance(self.transport.receive_response(2, time.monotonic()+10), SuccessResponse)
+
+    def test_pipe_buffered_notification_is_drained_before_request(self):
+        os.write(self.process.stdout_writer, b'{"method":"configWarning","params":{}}\n')
+        self._send_request(2, "project/list")
+        self.assertEqual(self.transport._notifications, 1)
+
+    def test_pipe_buffered_server_request_and_partial_frame_fail_closed(self):
+        for payload, message in ((b'{"id":9,"method":"server/call"}\n', "unexpected server request"),
+                                 (b'{"id":2', "preexisting incomplete frame")):
+            with self.subTest(message=message):
+                process = _Process()
+                transport = _StreamTransport(process)
+                try:
+                    os.write(process.stdout_writer, payload)
+                    with self.assertRaisesRegex(TransportError, f"^{message}$"):
+                        transport.send(Request(2, "project/list", {}), time.monotonic()+10)
+                    self.assertIsNone(transport._outstanding_request_id)
+                finally:
+                    transport.close(); process.stdin.close(); process.stdout.close(); process.stderr.close(); process.close()
+
+    def test_preexisting_stderr_is_bounded_and_not_a_response(self):
+        data = b"private diagnostic"
+        os.write(self.process.stderr_writer, data)
+        self._send_request(2, "project/list")
+        self.assertEqual(self.transport._stderr_total, len(data))
+        self.assertEqual(self.transport._stderr, data)
+        self.assertEqual(self.transport._outstanding_request_id, 2)
+
+    def test_preflight_no_ready_input_uses_zero_timeout(self):
+        original_select = self.transport._selector.select
+        calls = []
+        def observed_select(timeout=None):
+            calls.append(timeout)
+            return original_select(timeout)
+        self.transport._selector.select = observed_select
+        self._send_request(1, "initialize")
+        self.assertEqual(calls, [0])
 
     def test_prebuffered_server_request_and_second_outstanding_request_fail_closed(self):
         self.transport._buffer.extend(b'{"id":9,"method":"server/call"}\n')

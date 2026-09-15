@@ -127,20 +127,50 @@ class _StreamTransport:
                         raise TransportError("stdout frame limit")
 
     def _reject_preexisting_input(self) -> None:
-        """Consume allowed notifications, but reject input predating a request."""
+        """Nonblockingly drain input that predates a request and fail closed."""
         while True:
-            frame = self._take_frame()
-            if frame is None:
+            self._reject_preexisting_frames()
+            events = self._selector.select(0)
+            if not events:
                 if self._buffer:
                     raise TransportError("preexisting incomplete frame")
                 return
+            for key, _ in events:
+                try:
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                if key.data == "stderr":
+                    if not chunk:
+                        self._selector.unregister(key.fileobj)
+                        continue
+                    self._stderr_total += len(chunk)
+                    if self._stderr_total > MAX_STDERR_TOTAL:
+                        raise TransportError("stderr resource limit")
+                    room = MAX_STDERR_RETAINED - len(self._stderr)
+                    self._stderr.extend(chunk[:max(0, room)])
+                elif not chunk:
+                    self._selector.unregister(key.fileobj)
+                    if self._buffer:
+                        raise TransportError("preexisting incomplete frame")
+                    raise TransportError("early EOF")
+                else:
+                    self._stdout_total += len(chunk)
+                    if self._stdout_total > MAX_STDOUT_SESSION:
+                        raise TransportError("stdout session limit")
+                    self._buffer.extend(chunk)
+                    if b"\n" not in self._buffer and len(self._buffer) > MAX_STDOUT_FRAME:
+                        raise TransportError("stdout frame limit")
+
+    def _reject_preexisting_frames(self) -> None:
+        while (frame := self._take_frame()) is not None:
             envelope = self._decode(frame)
             if isinstance(envelope, Notification):
                 self._accept_notification(envelope, len(frame))
-                continue
-            if isinstance(envelope, Request):
+            elif isinstance(envelope, Request):
                 raise TransportError("unexpected server request")
-            raise TransportError("response correlation error")
+            else:
+                raise TransportError("response correlation error")
 
     def _take_frame(self) -> bytes | None:
         newline = self._buffer.find(b"\n")
