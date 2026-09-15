@@ -9,7 +9,7 @@ wire contract exists.
 | [2.1](subdivision-2.1-protocol-research.md) | Public Codex app-server protocol research | IMPLEMENTED |
 | 2.2 | Mock protocol transport and schemas | IMPLEMENTED — Deliveries 1–3 and the incident-evidence documentation follow-up are implemented |
 | Governance prerequisite for 2.3 | Bounded product-under-test execution policy | IMPLEMENTED — policy clarification only; no real execution or RPC |
-| 2.3 | Read-only real `project/list` integration | FUTURE — requires review and resolved integration gates |
+| 2.3 | Read-only real `project/list` integration | IN PROGRESS — Cloud/offline implementation COMPLETE; local WSL validation PENDING; capability MOCK_ONLY; mutation authorization NONE; GATE-002 UNSATISFIED |
 
 Capability progression remains governed by `GATE-001` through `GATE-003` in
 the [requirements](../../../projects-requirements.md). Completion of one

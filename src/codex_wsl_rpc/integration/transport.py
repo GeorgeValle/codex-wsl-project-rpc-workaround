@@ -37,6 +37,7 @@ class _StreamTransport:
         self._stderr = bytearray()
         self._notifications = 0
         self._notification_bytes = 0
+        self._outstanding_request_id: int | None = None
         for stream, event in ((process.stdout, "stdout"), (process.stderr, "stderr")):
             os.set_blocking(stream.fileno(), False)
             self._selector.register(stream, selectors.EVENT_READ, event)
@@ -54,6 +55,11 @@ class _StreamTransport:
             allowed = envelope.method == "initialized" and envelope.params is None
         if not allowed:
             raise TransportError("outbound envelope denied")
+        if isinstance(envelope, Request):
+            if self._outstanding_request_id is not None:
+                raise TransportError("request already outstanding")
+            self._reject_preexisting_input()
+            self._outstanding_request_id = envelope.id
         payload = json.dumps(envelope.to_wire(), separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
         view = memoryview(payload)
         while view:
@@ -73,6 +79,8 @@ class _StreamTransport:
                 selector.select(max(0.0, deadline - self._clock()))
 
     def receive_response(self, expected_id: int, deadline: float) -> Envelope:
+        if self._outstanding_request_id != expected_id:
+            raise TransportError("response correlation error")
         while True:
             frame = self._take_frame()
             if frame is not None:
@@ -84,6 +92,7 @@ class _StreamTransport:
                     raise TransportError("unexpected server request")
                 if type(envelope.id) is not int or envelope.id != expected_id:
                     raise TransportError("response correlation error")
+                self._outstanding_request_id = None
                 return envelope
             remaining = deadline - self._clock()
             if remaining <= 0:
@@ -116,6 +125,22 @@ class _StreamTransport:
                     self._buffer.extend(chunk)
                     if b"\n" not in self._buffer and len(self._buffer) > MAX_STDOUT_FRAME:
                         raise TransportError("stdout frame limit")
+
+    def _reject_preexisting_input(self) -> None:
+        """Consume allowed notifications, but reject input predating a request."""
+        while True:
+            frame = self._take_frame()
+            if frame is None:
+                if self._buffer:
+                    raise TransportError("preexisting incomplete frame")
+                return
+            envelope = self._decode(frame)
+            if isinstance(envelope, Notification):
+                self._accept_notification(envelope, len(frame))
+                continue
+            if isinstance(envelope, Request):
+                raise TransportError("unexpected server request")
+            raise TransportError("response correlation error")
 
     def _take_frame(self) -> bytes | None:
         newline = self._buffer.find(b"\n")
