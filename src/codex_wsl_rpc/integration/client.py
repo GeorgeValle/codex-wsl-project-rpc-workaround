@@ -164,8 +164,15 @@ class ReadOnlyProjectListClient:
                 )
             except OSError as error:
                 raise StartupError("app-server startup failed") from error
-            transport = _StreamTransport(process, clock=self._clock)
-            owned_child = _OwnedChildCleanup(process, transport)
+            # Popen transfers ownership of this exact child immediately.  Keep
+            # that ownership even if transport initialization only partially
+            # succeeds and raises.
+            owned_child = _OwnedChildCleanup(process, None)
+            try:
+                transport = _StreamTransport(process, clock=self._clock)
+            except Exception as error:
+                raise StartupError("transport initialization failed") from error
+            owned_child.transport = transport
             init_deadline = self._clock() + INITIALIZE_TIMEOUT
             params = InitializeParams(ClientInfo("codex-wsl-rpc-read-only", "1"), InitializeCapabilities(experimental_api=True))
             phase = "initialize_send"
@@ -216,8 +223,7 @@ class ReadOnlyProjectListClient:
             if owned_child is not None and not owned_child.started:
                 self._cleanup(owned_child)
 
-    @staticmethod
-    def _cleanup(owned_child: _OwnedChildCleanup) -> str:
+    def _cleanup(self, owned_child: _OwnedChildCleanup) -> str:
         """Finish one bounded cleanup lifecycle, deferring Ctrl+C until reap."""
         if owned_child.started:
             if owned_child.completed:
@@ -237,9 +243,13 @@ class ReadOnlyProjectListClient:
         except Exception: failures.append("stdin")
 
         def wait_until_finished(timeout: float) -> bool:
+            deadline = self._clock() + timeout
             while True:
+                remaining = deadline - self._clock()
+                if remaining <= 0:
+                    return process.returncode is not None
                 try:
-                    process.wait(timeout=timeout)
+                    process.wait(timeout=remaining)
                     return True
                 except KeyboardInterrupt:
                     owned_child.interrupted = True
@@ -249,29 +259,30 @@ class ReadOnlyProjectListClient:
                     return False
                 except Exception:
                     failures.append("wait")
-                    return False
+                    return process.returncode is not None
 
         reaped = wait_until_finished(CLOSE_TIMEOUT)
-        if not reaped and not failures:
+        if not reaped:
             outcome = "terminated_owned_child"
             owned_child.terminate_issued = True
             try: process.terminate()
             except KeyboardInterrupt: owned_child.interrupted = True
             except Exception: failures.append("terminate")
             reaped = wait_until_finished(TERMINATE_TIMEOUT)
-            if not reaped and not failures:
+            if not reaped:
                 outcome = "killed_owned_child"
                 owned_child.kill_issued = True
                 try: process.kill()
                 except KeyboardInterrupt: owned_child.interrupted = True
                 except Exception: failures.append("kill")
                 reaped = wait_until_finished(KILL_TIMEOUT)
-                if not reaped and not failures:
+                if not reaped:
                     failures.append("reap")
+        if reaped:
+            owned_child.completed = True
+            owned_child.process = None
+            owned_child.transport = None
         if failures: raise CleanupError("owned-child cleanup failed")
-        owned_child.completed = True
-        owned_child.process = None
-        owned_child.transport = None
         if owned_child.interrupted:
             raise OperatorCancelledError("operator cancelled")
         return outcome

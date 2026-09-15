@@ -6,7 +6,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from codex_wsl_rpc.integration import IntegrationAuthorization, IntegrationError, ReadOnlyProjectListClient
 from codex_wsl_rpc.integration.client import (CleanupError, OperatorCancelledError,
-    PINNED_CODEX_SHA, UnsupportedPlatformError, _OwnedChildCleanup)
+    PINNED_CODEX_SHA, StartupError, UnsupportedPlatformError, _OwnedChildCleanup)
 from codex_wsl_rpc.integration.transport import TransportError
 from codex_wsl_rpc.protocol import SuccessResponse
 
@@ -41,6 +41,21 @@ class CleanupProcess:
         self.terminate=mock.Mock(); self.kill=mock.Mock()
     def wait(self, timeout):
         result=next(self.waits)
+        if isinstance(result, BaseException): raise result
+        self.returncode=result
+        return result
+
+class FakeClock:
+    def __init__(self): self.now = 0.0
+    def __call__(self): return self.now
+
+class TimedCleanupProcess(CleanupProcess):
+    def __init__(self, clock, waits):
+        super().__init__([]); self.clock=clock; self.waits=iter(waits); self.timeouts=[]
+    def wait(self, timeout):
+        self.timeouts.append(timeout)
+        result, elapsed = next(self.waits)
+        self.clock.now += elapsed
         if isinstance(result, BaseException): raise result
         self.returncode=result
         return result
@@ -134,7 +149,7 @@ class ClientTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 process=CleanupProcess(waits)
                 state = _OwnedChildCleanup(process, None)
-                self.assertEqual(ReadOnlyProjectListClient._cleanup(state), expected)
+                self.assertEqual(self._client()._cleanup(state), expected)
                 self.assertTrue(state.completed)
                 self.assertEqual(process.terminate.call_count, terminates)
                 self.assertEqual(process.kill.call_count, kills)
@@ -142,7 +157,7 @@ class ClientTests(unittest.TestCase):
     def test_cleanup_raises_when_owned_child_cannot_be_reaped(self):
         process=CleanupProcess([subprocess.TimeoutExpired("fake", 1)] * 3)
         with self.assertRaisesRegex(IntegrationError, "owned-child cleanup failed"):
-            ReadOnlyProjectListClient._cleanup(_OwnedChildCleanup(process, None))
+            self._client()._cleanup(_OwnedChildCleanup(process, None))
         process.terminate.assert_called_once_with(); process.kill.assert_called_once_with()
 
     def test_summary_reports_actual_forced_cleanup(self):
@@ -192,7 +207,7 @@ class ClientTests(unittest.TestCase):
                 process = CleanupProcess(waits)
                 state = _OwnedChildCleanup(process, None)
                 with self.assertRaises(OperatorCancelledError):
-                    ReadOnlyProjectListClient._cleanup(state)
+                    self._client()._cleanup(state)
                 self.assertTrue(state.started)
                 self.assertTrue(state.completed)
                 self.assertIsNone(state.process)
@@ -208,11 +223,70 @@ class ClientTests(unittest.TestCase):
         ])
         state = _OwnedChildCleanup(process, None)
         with self.assertRaises(CleanupError):
-            ReadOnlyProjectListClient._cleanup(state)
+            self._client()._cleanup(state)
         self.assertTrue(state.started)
         self.assertFalse(state.completed)
         process.terminate.assert_called_once_with()
         process.kill.assert_called_once_with()
+
+    def test_close_failures_do_not_suppress_bounded_escalation(self):
+        cases = (
+            (True, False, [subprocess.TimeoutExpired("fake", 1), 0], 1, 0),
+            (False, True, [subprocess.TimeoutExpired("fake", 1), 0], 1, 0),
+            (True, False, [subprocess.TimeoutExpired("fake", 1), subprocess.TimeoutExpired("fake", 1), 0], 1, 1),
+            (True, True, [subprocess.TimeoutExpired("fake", 1), subprocess.TimeoutExpired("fake", 1), 0], 1, 1),
+        )
+        for transport_fails, stdin_fails, waits, terminates, kills in cases:
+            with self.subTest(transport=transport_fails, stdin=stdin_fails, kills=kills):
+                process = CleanupProcess(waits)
+                transport = mock.Mock()
+                if transport_fails: transport.close.side_effect = OSError("close")
+                if stdin_fails: process.stdin.close.side_effect = OSError("close")
+                state = _OwnedChildCleanup(process, transport)
+                with self.assertRaises(CleanupError): self._client()._cleanup(state)
+                self.assertTrue(state.completed)
+                self.assertIsNone(state.process)
+                self.assertEqual(process.terminate.call_count, terminates)
+                self.assertEqual(process.kill.call_count, kills)
+
+    def test_reaped_child_with_close_diagnostics_is_not_signalled(self):
+        process = CleanupProcess([0]); transport = mock.Mock()
+        transport.close.side_effect = OSError("close")
+        with self.assertRaises(CleanupError):
+            self._client()._cleanup(_OwnedChildCleanup(process, transport))
+        process.terminate.assert_not_called(); process.kill.assert_not_called()
+
+    def test_cleanup_interrupt_retries_share_each_absolute_stage_deadline(self):
+        clock = FakeClock()
+        waits = [
+            (KeyboardInterrupt(), 1.9), (KeyboardInterrupt(), .1),
+            (subprocess.TimeoutExpired("fake", 1), 2.0),
+            (KeyboardInterrupt(), 1.5), (KeyboardInterrupt(), .5),
+        ]
+        process = TimedCleanupProcess(clock, waits)
+        state = _OwnedChildCleanup(process, None)
+        with self.assertRaises(CleanupError):
+            self._client(_clock=clock)._cleanup(state)
+        self.assertEqual(len(process.timeouts), 5)
+        self.assertAlmostEqual(process.timeouts[0], 2.0)
+        self.assertAlmostEqual(process.timeouts[1], .1)
+        self.assertAlmostEqual(process.timeouts[2], 2.0)
+        self.assertAlmostEqual(process.timeouts[3], 2.0)
+        self.assertAlmostEqual(process.timeouts[4], .5)
+        process.terminate.assert_called_once_with(); process.kill.assert_called_once_with()
+
+    def test_transport_construction_failure_keeps_exact_child_owned(self):
+        failure_points = ("selector factory", "stdout blocking", "stderr blocking",
+                          "stdout register", "stderr register", "stdin blocking")
+        for point in failure_points:
+            with self.subTest(point=point):
+                process = CleanupProcess([0])
+                client = self._client(_popen=lambda *a, **k: process)
+                with mock.patch("codex_wsl_rpc.integration.client._StreamTransport",
+                                side_effect=OSError(point)):
+                    with self.assertRaises(StartupError): client.list_one_page()
+                process.stdin.close.assert_called_once_with()
+                process.terminate.assert_not_called(); process.kill.assert_not_called()
 
     def test_method_not_found_remains_ambiguous_and_private(self):
         fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":"/private","platformFamily":"unix","platformOs":"linux"}}, {"id":2,"error":{"code":-32601,"message":"secret method or store detail","data":{"path":"/private/project"}}}])
