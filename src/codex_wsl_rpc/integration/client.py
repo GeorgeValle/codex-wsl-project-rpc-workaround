@@ -164,13 +164,19 @@ class ReadOnlyProjectListClient:
         path = self._executable_path
         if not path.is_absolute():
             raise InvalidTargetError("target must be an existing absolute path")
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+                 getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
         fd = None
         try:
             path_status = self._lstat(path)
+            if not stat.S_ISREG(path_status.st_mode):
+                raise UnsupportedTargetError(
+                    "target must be a reviewed executable regular file"
+                )
             fd = os.open(path, flags)
             opened_status = os.fstat(fd)
-            header = os.pread(fd, 4, 0)
+        except UnsupportedTargetError:
+            raise
         except OSError as error:
             if fd is not None:
                 os.close(fd)
@@ -184,6 +190,11 @@ class ReadOnlyProjectListClient:
                 (opened_status.st_dev, opened_status.st_ino)):
             os.close(fd)
             raise InvalidTargetError("target identity changed during validation")
+        try:
+            header = os.pread(fd, 4, 0)
+        except OSError as error:
+            os.close(fd)
+            raise InvalidTargetError("target could not be validated") from error
         if header != b"\x7fELF":
             os.close(fd)
             raise UnsupportedTargetError("target must be the reviewed concrete native executable")
@@ -286,7 +297,20 @@ class ReadOnlyProjectListClient:
 
     def _cleanup(self, owned_child: _OwnedChildCleanup) -> str:
         """Finish one bounded cleanup lifecycle, deferring Ctrl+C until reap."""
-        previous_mask = self._sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+        deferred_during_mask = False
+        while True:
+            try:
+                previous_mask = self._sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+                break
+            except KeyboardInterrupt:
+                # Mask acquisition is part of cleanup entry: cancellation here
+                # is deferred, ownership remains intact, and acquisition is
+                # retried before the lifecycle is marked as started.
+                deferred_during_mask = True
+            except Exception as error:
+                raise CleanupError("owned-child cleanup protection failed") from error
+        if deferred_during_mask:
+            owned_child.interrupted = True
         terminal_error: CleanupError | None = None
         outcome = "graceful"
         try:

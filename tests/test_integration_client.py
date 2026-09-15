@@ -7,7 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from codex_wsl_rpc.integration import IntegrationAuthorization, IntegrationError, ReadOnlyProjectListClient
 from codex_wsl_rpc.integration.client import (CleanupError, InvalidTargetError,
     OperatorCancelledError, PINNED_CODEX_SHA, StartupError,
-    UnsupportedPlatformError, _OwnedChildCleanup, _SignalDelivery)
+    UnsupportedPlatformError, UnsupportedTargetError, _OwnedChildCleanup,
+    _SignalDelivery)
 from codex_wsl_rpc.integration.transport import TransportError
 from codex_wsl_rpc.protocol import SuccessResponse
 
@@ -201,6 +202,46 @@ class ClientTests(unittest.TestCase):
         self.assertEqual((actual.st_dev, actual.st_ino),
                          (os.lstat(self.exe).st_dev, os.lstat(self.exe).st_ino))
 
+    def test_non_regular_path_is_rejected_before_open(self):
+        regular = os.lstat(self.exe)
+        non_regular_modes = (
+            stat.S_IFIFO | 0o700,
+            stat.S_IFDIR | 0o700,
+            stat.S_IFSOCK | 0o700,
+            stat.S_IFCHR | 0o700,
+            stat.S_IFLNK | 0o700,
+        )
+        for mode in non_regular_modes:
+            with self.subTest(mode=mode), mock.patch(
+                    "codex_wsl_rpc.integration.client.os.open") as opened:
+                path_status = mock.Mock(
+                    st_mode=mode, st_dev=regular.st_dev, st_ino=regular.st_ino
+                )
+                with self.assertRaises(UnsupportedTargetError):
+                    self._client(_lstat=lambda path, value=path_status: value)._validate()
+                opened.assert_not_called()
+
+    def test_validation_open_is_nonblocking_and_rejects_replaced_fifo(self):
+        path_status = os.lstat(self.exe)
+        opened_status = mock.Mock(
+            st_mode=stat.S_IFIFO | 0o700,
+            st_dev=path_status.st_dev,
+            st_ino=path_status.st_ino,
+        )
+        with mock.patch("codex_wsl_rpc.integration.client.os.open", return_value=91) as opened, \
+                mock.patch("codex_wsl_rpc.integration.client.os.fstat", return_value=opened_status), \
+                mock.patch("codex_wsl_rpc.integration.client.os.pread") as pread, \
+                mock.patch("codex_wsl_rpc.integration.client.os.close") as closed:
+            with self.assertRaises(UnsupportedTargetError):
+                self._client()._validate()
+        flags = opened.call_args.args[1]
+        self.assertEqual(flags & getattr(os, "O_NONBLOCK", 0),
+                         getattr(os, "O_NONBLOCK", 0))
+        self.assertEqual(flags & getattr(os, "O_NOFOLLOW", 0),
+                         getattr(os, "O_NOFOLLOW", 0))
+        pread.assert_not_called()
+        closed.assert_called_once_with(91)
+
     def test_codex_home_category_is_derived_without_exposing_raw_path(self):
         cases = (
             ("/home/user/.codex", "posix_absolute"),
@@ -257,6 +298,70 @@ class ClientTests(unittest.TestCase):
                 self.assertTrue(state.completed)
                 self.assertEqual(process.terminate.call_count, terminates)
                 self.assertEqual(process.kill.call_count, kills)
+
+    def test_cleanup_retries_interrupted_mask_acquisition_before_starting(self):
+        for interruptions in (1, 3):
+            with self.subTest(interruptions=interruptions):
+                process = CleanupProcess([0])
+                state = _OwnedChildCleanup(process, None)
+                attempts = 0
+                def sigmask(operation, mask):
+                    nonlocal attempts
+                    if operation == signal.SIG_BLOCK:
+                        attempts += 1
+                        self.assertFalse(state.started)
+                        if attempts <= interruptions:
+                            raise KeyboardInterrupt()
+                        return set()
+                    return None
+                with self.assertRaises(OperatorCancelledError):
+                    self._client(_sigmask=sigmask)._cleanup(state)
+                self.assertEqual(attempts, interruptions + 1)
+                self.assertTrue(state.completed)
+                self.assertIsNone(state.process)
+
+    def test_finally_cleanup_retries_interrupted_mask_acquisition(self):
+        process = CleanupProcess([0])
+        transport = mock.Mock()
+        transport.send.side_effect = TransportError("fake")
+        cleanup_blocks = 0
+        total_blocks = 0
+        def sigmask(operation, mask):
+            nonlocal cleanup_blocks, total_blocks
+            if operation == signal.SIG_BLOCK:
+                total_blocks += 1
+                if total_blocks > 1:
+                    cleanup_blocks += 1
+                    if cleanup_blocks == 1:
+                        raise KeyboardInterrupt()
+                return set()
+            return None
+        client = self._client(_popen=lambda *a, **k: process, _sigmask=sigmask)
+        with mock.patch("codex_wsl_rpc.integration.client._StreamTransport",
+                        return_value=transport):
+            with self.assertRaises(OperatorCancelledError):
+                client.list_one_page()
+        self.assertEqual(cleanup_blocks, 2)
+        self.assertIsNotNone(process.returncode)
+
+    def test_cleanup_failure_precedes_cancellation_deferred_during_mask(self):
+        process = CleanupProcess([subprocess.TimeoutExpired("fake", 1)] * 3)
+        state = _OwnedChildCleanup(process, None)
+        attempts = 0
+        def sigmask(operation, mask):
+            nonlocal attempts
+            if operation == signal.SIG_BLOCK:
+                attempts += 1
+                if attempts == 1:
+                    raise KeyboardInterrupt()
+                return set()
+            return None
+        with self.assertRaises(CleanupError):
+            self._client(_sigmask=sigmask)._cleanup(state)
+        self.assertEqual(attempts, 2)
+        self.assertFalse(state.completed)
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
 
     def test_cleanup_masks_sigint_through_final_bookkeeping_and_restores(self):
         blocked = False
