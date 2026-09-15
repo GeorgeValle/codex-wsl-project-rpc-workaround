@@ -41,7 +41,7 @@ class SafetyTests(unittest.TestCase):
             client_errors.StartupError("raw"), client_errors.CleanupError("raw"),
             client_errors.AuthorizationError("raw"), client_errors.UnsupportedPlatformError("raw"),
             client_errors.UnsupportedTargetError("raw"), client_errors.InitializeError("raw"),
-            client_errors.ProjectListError("raw"),
+            client_errors.ProjectListError("raw"), client_errors.OperatorCancelledError("raw"),
         )
         for error in errors:
             category=error.category

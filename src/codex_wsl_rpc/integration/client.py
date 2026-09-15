@@ -174,60 +174,59 @@ class ReadOnlyProjectListClient:
         return _is_wsl_kernel_release(release)
 
     def _validate(self) -> tuple[_ValidatedExecutable, _ValidatedHome]:
-        if self._authorization is not IntegrationAuthorization.READ_ONLY_PROJECT_LIST:
-            raise AuthorizationError("explicit read-only authorization is missing")
-        if not self._is_wsl():
-            raise UnsupportedPlatformError("positive WSL evidence is required")
-        path = self._executable_path
-        if not path.is_absolute():
-            raise InvalidTargetError("target must be an existing absolute path")
-        flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
-                 getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-        fd = None
+        fd: int | None = None
+        home: _ValidatedHome | None = None
+        validated = False
         try:
+            if self._authorization is not IntegrationAuthorization.READ_ONLY_PROJECT_LIST:
+                raise AuthorizationError("explicit read-only authorization is missing")
+            if not self._is_wsl():
+                raise UnsupportedPlatformError("positive WSL evidence is required")
+            path = self._executable_path
+            if not path.is_absolute():
+                raise InvalidTargetError("target must be an existing absolute path")
+            flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+                     getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
             path_status = self._lstat(path)
             if not stat.S_ISREG(path_status.st_mode):
                 raise UnsupportedTargetError(
                     "target must be a reviewed executable regular file"
                 )
-            fd = os.open(path, flags)
-            opened_status = os.fstat(fd)
-        except UnsupportedTargetError:
-            raise
-        except OSError as error:
-            if fd is not None:
-                os.close(fd)
-            raise InvalidTargetError("target could not be validated") from error
-        if (stat.S_ISLNK(path_status.st_mode) or
-                not stat.S_ISREG(opened_status.st_mode) or
-                not opened_status.st_mode & 0o111):
-            os.close(fd)
-            raise UnsupportedTargetError("target must be a reviewed executable regular file")
-        if ((path_status.st_dev, path_status.st_ino) !=
-                (opened_status.st_dev, opened_status.st_ino)):
-            os.close(fd)
-            raise InvalidTargetError("target identity changed during validation")
-        try:
-            header = os.pread(fd, 4, 0)
-        except OSError as error:
-            os.close(fd)
-            raise InvalidTargetError("target could not be validated") from error
-        if header != b"\x7fELF":
-            os.close(fd)
-            raise UnsupportedTargetError("target must be the reviewed concrete native executable")
-        try:
+            try:
+                fd = os.open(path, flags)
+                opened_status = os.fstat(fd)
+            except OSError as error:
+                raise InvalidTargetError("target could not be validated") from error
+            if (stat.S_ISLNK(path_status.st_mode) or
+                    not stat.S_ISREG(opened_status.st_mode) or
+                    not opened_status.st_mode & 0o111):
+                raise UnsupportedTargetError("target must be a reviewed executable regular file")
+            if ((path_status.st_dev, path_status.st_ino) !=
+                    (opened_status.st_dev, opened_status.st_ino)):
+                raise InvalidTargetError("target identity changed during validation")
+            try:
+                header = os.pread(fd, 4, 0)
+            except OSError as error:
+                raise InvalidTargetError("target could not be validated") from error
+            if header != b"\x7fELF":
+                raise UnsupportedTargetError("target must be the reviewed concrete native executable")
             home = self._validate_home()
-        except Exception:
-            os.close(fd)
-            raise
-        return _ValidatedExecutable(fd), home
+            validated = True
+            return _ValidatedExecutable(fd), home
+        finally:
+            if not validated:
+                if home is not None:
+                    os.close(home.fd)
+                if fd is not None:
+                    os.close(fd)
 
     def _validate_home(self) -> _ValidatedHome:
         if not self._home_path.is_absolute():
             raise InvalidTargetError("home must be an existing absolute directory")
         flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
                  getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0))
-        fd = None
+        fd: int | None = None
+        validated = False
         try:
             path_status = self._lstat(self._home_path)
             if stat.S_ISLNK(path_status.st_mode) or not stat.S_ISDIR(path_status.st_mode):
@@ -238,13 +237,15 @@ class ReadOnlyProjectListClient:
                     (path_status.st_dev, path_status.st_ino) !=
                     (opened_status.st_dev, opened_status.st_ino)):
                 raise InvalidTargetError("home identity changed during validation")
+            validated = True
             return _ValidatedHome(fd)
         except Exception as error:
-            if fd is not None:
-                os.close(fd)
             if isinstance(error, InvalidTargetError):
                 raise
             raise InvalidTargetError("home could not be validated") from error
+        finally:
+            if fd is not None and not validated:
+                os.close(fd)
 
     def _next_request_id(self, used: set[str]) -> str:
         request_id = self._id_generator()
@@ -254,13 +255,14 @@ class ReadOnlyProjectListClient:
         return request_id
 
     def list_one_page(self) -> ProjectListRunResult:
-        executable, home = self._validate()
+        executable = home = None
         process = transport = None
         owned_child = None
         cleanup = "not_started"
         phase = "startup"
         request_ids: set[str] = set()
         try:
+            executable, home = self._validate()
             try:
                 previous_mask = self._sigmask(signal.SIG_BLOCK, {signal.SIGINT})
                 try:
@@ -279,6 +281,7 @@ class ReadOnlyProjectListClient:
             finally:
                 os.close(executable.fd)
                 os.close(home.fd)
+                executable = home = None
             # Popen transfers ownership of this exact child immediately.  Keep
             # that ownership even if transport initialization only partially
             # succeeds and raises.
@@ -342,6 +345,10 @@ class ReadOnlyProjectListClient:
                 category=f"{category.replace('/', '_')}_transport_failure",
             ) from error
         finally:
+            if executable is not None:
+                os.close(executable.fd)
+            if home is not None:
+                os.close(home.fd)
             if (owned_child is not None and not owned_child.started and
                     not owned_child.protection_failed):
                 self._cleanup(owned_child)

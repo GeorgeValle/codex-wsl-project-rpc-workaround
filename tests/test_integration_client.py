@@ -318,6 +318,63 @@ class ClientTests(unittest.TestCase):
         pread.assert_not_called()
         closed.assert_called_once_with(91)
 
+    def test_validation_cancellation_before_open_is_safe_and_never_launches(self):
+        popen = mock.Mock()
+        client = self._client(_popen=popen)
+        with mock.patch.object(client, "_is_wsl", side_effect=KeyboardInterrupt()):
+            with self.assertRaises(OperatorCancelledError):
+                client.list_one_page()
+        popen.assert_not_called()
+
+    def test_validation_cancellation_after_executable_open_closes_it_before_launch(self):
+        popen = mock.Mock()
+        client = self._client(_popen=popen)
+        opened_fd = None
+        original_open = os.open
+
+        def tracked_open(path, flags):
+            nonlocal opened_fd
+            opened_fd = original_open(path, flags)
+            return opened_fd
+
+        with mock.patch("codex_wsl_rpc.integration.client.os.open", side_effect=tracked_open), \
+                mock.patch.object(client, "_validate_home", side_effect=KeyboardInterrupt()):
+            with self.assertRaises(OperatorCancelledError):
+                client.list_one_page()
+        self.assertIsNotNone(opened_fd)
+        with self.assertRaises(OSError):
+            os.fstat(opened_fd)
+        popen.assert_not_called()
+
+    def test_validation_cancellation_after_both_opens_closes_both_before_launch(self):
+        popen = mock.Mock()
+        opened_fds = []
+        original_open, original_fstat = os.open, os.fstat
+        fstat_calls = 0
+
+        def tracked_open(path, flags):
+            fd = original_open(path, flags)
+            opened_fds.append(fd)
+            return fd
+
+        def interrupt_after_home_open(fd):
+            nonlocal fstat_calls
+            fstat_calls += 1
+            if fstat_calls == 2:
+                raise KeyboardInterrupt()
+            return original_fstat(fd)
+
+        with mock.patch("codex_wsl_rpc.integration.client.os.open", side_effect=tracked_open), \
+                mock.patch("codex_wsl_rpc.integration.client.os.fstat",
+                           side_effect=interrupt_after_home_open):
+            with self.assertRaises(OperatorCancelledError):
+                self._client(_popen=popen).list_one_page()
+        self.assertEqual(len(opened_fds), 2)
+        for fd in opened_fds:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+        popen.assert_not_called()
+
     def test_codex_home_category_is_derived_without_exposing_raw_path(self):
         cases = (
             ("/home/user/.codex", "posix_absolute"),
