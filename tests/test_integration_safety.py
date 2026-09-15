@@ -19,6 +19,15 @@ class SafetyTests(unittest.TestCase):
         with mock.patch.object(argparse.ArgumentParser,"parse_args",side_effect=AssertionError("parsed")), mock.patch.object(subprocess,"Popen",side_effect=AssertionError("spawned")), mock.patch.object(os,"getenv",side_effect=AssertionError("environment read")):
             spec.loader.exec_module(module)
         self.assertEqual(module.REPOSITORY_ROOT, ROOT)
+    def test_integration_import_does_not_require_pthread_sigmask(self):
+        code=("import sys; sys.path.insert(0,"+repr(str(SRC))+"); import signal; "
+              "hasattr(signal,'pthread_sigmask') and delattr(signal,'pthread_sigmask'); "
+              "import codex_wsl_rpc.integration")
+        completed=subprocess.run(
+            [sys.executable,"-I","-c",code], cwd=ROOT,
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode,0,completed.stderr)
     def test_runner_bootstraps_src_in_isolated_checkout_import(self):
         runner=ROOT/"tools/run_read_only_project_list.py"
         code=("import importlib.util; p="+repr(str(runner))+"; "
@@ -40,7 +49,8 @@ class SafetyTests(unittest.TestCase):
             module.IntegrationError("raw", category="project_list_transport_failure"),
             client_errors.StartupError("raw"), client_errors.CleanupError("raw"),
             client_errors.AuthorizationError("raw"), client_errors.UnsupportedPlatformError("raw"),
-            client_errors.UnsupportedTargetError("raw"), client_errors.InitializeError("raw"),
+            client_errors.InvalidTargetError("raw"), client_errors.UnsupportedTargetError("raw"),
+            client_errors.InitializeError("raw"),
             client_errors.ProjectListError("raw"), client_errors.OperatorCancelledError("raw"),
         )
         for error in errors:

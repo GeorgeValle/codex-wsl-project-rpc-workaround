@@ -216,6 +216,61 @@ class ClientTests(unittest.TestCase):
             with self.assertRaises(OSError): os.fstat(inherited_fd)
         self.assertEqual(result.summary.target_revision_mapping, "NOT_ESTABLISHED")
 
+    def test_executable_lstat_failures_are_safe_and_never_launch(self):
+        private_path = self.temp.name + "/private-missing-codex"
+        failures = (
+            FileNotFoundError(2, "private errno detail", private_path),
+            PermissionError(13, "private errno detail", private_path),
+            OSError(22, "private errno detail", private_path),
+        )
+        for failure in failures:
+            with self.subTest(error=type(failure).__name__):
+                popen = mock.Mock()
+                client = self._client(
+                    _lstat=mock.Mock(side_effect=failure), _popen=popen
+                )
+                with mock.patch("codex_wsl_rpc.integration.client.os.close") as close:
+                    with self.assertRaises(InvalidTargetError) as caught:
+                        client.list_one_page()
+                self.assertEqual(caught.exception.category, "invalid_target")
+                self.assertEqual(str(caught.exception), "target could not be validated")
+                self.assertNotIn(private_path, str(caught.exception))
+                self.assertNotIn("errno", str(caught.exception).lower())
+                self.assertIsNone(caught.exception.__cause__)
+                close.assert_not_called()
+                popen.assert_not_called()
+
+        nonexistent = ReadOnlyProjectListClient(
+            executable_path=Path(private_path), home_path=self.home,
+            authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,
+            _proc_reader=lambda path: "5.15.90.1-MICROSOFT-standard-WSL2",
+            _popen=mock.Mock(),
+        )
+        with self.assertRaises(InvalidTargetError):
+            nonexistent.list_one_page()
+
+    def test_sigmask_is_resolved_only_after_positive_wsl_gate(self):
+        popen = mock.Mock()
+        lstat = mock.Mock(side_effect=AssertionError("target validation ran"))
+        with mock.patch.object(signal, "pthread_sigmask", create=True) as sigmask:
+            unsupported = self._client(
+                _platform="win32", _sigmask=None, _popen=popen, _lstat=lstat
+            )
+            with self.assertRaises(UnsupportedPlatformError):
+                unsupported.list_one_page()
+            sigmask.assert_not_called()
+            lstat.assert_not_called()
+            popen.assert_not_called()
+
+    def test_missing_sigmask_on_supported_path_fails_closed_without_launch(self):
+        popen = mock.Mock()
+        with mock.patch.object(signal, "pthread_sigmask", None, create=True):
+            client = self._client(_sigmask=None, _popen=popen)
+            with self.assertRaises(UnsupportedPlatformError) as caught:
+                client.list_one_page()
+        self.assertEqual(caught.exception.category, "unsupported_platform")
+        popen.assert_not_called()
+
     def test_home_uses_retained_directory_identity_after_rename_and_recreate(self):
         observed = {}
         fake = FakeProcess([

@@ -152,7 +152,7 @@ class ReadOnlyProjectListClient:
                  _proc_reader: Callable[[Path], str] = Path.read_text,
                  _lstat: Callable[[Path], os.stat_result] = os.lstat,
                  _id_generator: Callable[[], str] = lambda: secrets.token_hex(16),
-                 _sigmask: Callable[..., object] = signal.pthread_sigmask) -> None:
+                 _sigmask: Callable[..., object] | None = None) -> None:
         self._executable_path = Path(executable_path)
         self._home_path = Path(home_path)
         self._authorization = authorization
@@ -187,7 +187,10 @@ class ReadOnlyProjectListClient:
                 raise InvalidTargetError("target must be an existing absolute path")
             flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
                      getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-            path_status = self._lstat(path)
+            try:
+                path_status = self._lstat(path)
+            except OSError:
+                raise InvalidTargetError("target could not be validated") from None
             if not stat.S_ISREG(path_status.st_mode):
                 raise UnsupportedTargetError(
                     "target must be a reviewed executable regular file"
@@ -254,6 +257,15 @@ class ReadOnlyProjectListClient:
         used.add(request_id)
         return request_id
 
+    def _resolve_sigmask(self) -> Callable[..., object]:
+        sigmask = self._sigmask
+        if sigmask is None:
+            sigmask = getattr(signal, "pthread_sigmask", None)
+        if sigmask is None:
+            raise UnsupportedPlatformError("SIGINT masking is unavailable")
+        self._sigmask = sigmask
+        return sigmask
+
     def list_one_page(self) -> ProjectListRunResult:
         executable = home = None
         process = transport = None
@@ -263,8 +275,9 @@ class ReadOnlyProjectListClient:
         request_ids: set[str] = set()
         try:
             executable, home = self._validate()
+            sigmask = self._resolve_sigmask()
             try:
-                previous_mask = self._sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+                previous_mask = sigmask(signal.SIG_BLOCK, {signal.SIGINT})
                 try:
                     process = self._popen(
                     [f"/proc/self/fd/{executable.fd}", "app-server", "--listen", "stdio://"],
@@ -275,7 +288,7 @@ class ReadOnlyProjectListClient:
                     )
                     owned_child = _OwnedChildCleanup(process, None)
                 finally:
-                    self._sigmask(signal.SIG_SETMASK, previous_mask)
+                    sigmask(signal.SIG_SETMASK, previous_mask)
             except OSError as error:
                 raise StartupError("app-server startup failed") from error
             finally:
@@ -355,6 +368,11 @@ class ReadOnlyProjectListClient:
 
     def _cleanup(self, owned_child: _OwnedChildCleanup) -> str:
         """Finish one bounded cleanup lifecycle, deferring Ctrl+C until reap."""
+        try:
+            sigmask = self._resolve_sigmask()
+        except UnsupportedPlatformError as error:
+            owned_child.protection_failed = True
+            raise CleanupError("owned-child cleanup protection failed") from error
         deferred_during_mask = False
         cleanup_deadline = None
         for _ in range(MAX_MASK_ACQUISITION_ATTEMPTS):
@@ -371,7 +389,7 @@ class ReadOnlyProjectListClient:
             try:
                 if self._clock() >= cleanup_deadline:
                     break
-                previous_mask = self._sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+                previous_mask = sigmask(signal.SIG_BLOCK, {signal.SIGINT})
                 break
             except KeyboardInterrupt:
                 # Mask acquisition is part of cleanup entry: cancellation here
@@ -504,7 +522,7 @@ class ReadOnlyProjectListClient:
                 terminal_error = CleanupError("owned-child cleanup failed")
         finally:
             try:
-                self._sigmask(signal.SIG_SETMASK, previous_mask)
+                sigmask(signal.SIG_SETMASK, previous_mask)
             except KeyboardInterrupt:
                 owned_child.interrupted = True
             except Exception:
