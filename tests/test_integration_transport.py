@@ -142,6 +142,54 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(self.transport._notifications, 1)
         self.assertNotIn(b"\n", self.transport._buffer)
 
+    def test_incomplete_trailing_stdout_in_same_read_fails_closed(self):
+        for trailing in (b'{', b'\xe2\x82'):
+            with self.subTest(trailing=trailing):
+                process = _Process()
+                transport = _StreamTransport(process)
+                try:
+                    transport.send(Request("expected", "project/list", {}), time.monotonic()+10)
+                    os.read(process.stdin_reader, 4096)
+                    os.write(process.stdout_writer,
+                             b'{"id":"expected","result":{}}\n' + trailing)
+                    with self.assertRaisesRegex(TransportError, "^trailing incomplete frame$"):
+                        transport.receive_response("expected", time.monotonic()+10)
+                    self.assertTrue(transport._buffer)
+                finally:
+                    transport.close(); process.stdin.close(); process.stdout.close(); process.stderr.close(); process.close()
+
+    def test_pipe_readable_incomplete_trailing_stdout_fails_closed(self):
+        self._send_request("expected", "project/list")
+        self.transport._buffer.extend(b'{"id":"expected","result":{}}\n')
+        os.write(self.process.stdout_writer, b'{"partial"')
+        with self.assertRaisesRegex(TransportError, "^trailing incomplete frame$"):
+            self.transport.receive_response("expected", time.monotonic()+10)
+        self.assertEqual(self.transport._buffer, b'{"partial"')
+
+    def test_allowed_trailing_notification_then_partial_frame_fails_closed(self):
+        self._send_request("expected", "project/list")
+        self.transport._buffer.extend(
+            b'{"id":"expected","result":{}}\n'
+            b'{"method":"configWarning","params":{}}\n{')
+        with self.assertRaisesRegex(TransportError, "^trailing incomplete frame$"):
+            self.transport.receive_response("expected", time.monotonic()+10)
+        self.assertEqual(self.transport._notifications, 1)
+        self.assertEqual(self.transport._buffer, b'{')
+
+    def test_final_trailing_validation_uses_only_nonblocking_select(self):
+        self._send_request("expected", "project/list")
+        self.transport._buffer.extend(b'{"id":"expected","result":{}}\n')
+        original_select = self.transport._selector.select
+        calls = []
+        def observed_select(timeout=None):
+            calls.append(timeout)
+            return original_select(timeout)
+        self.transport._selector.select = observed_select
+        response = self.transport.receive_response("expected", time.monotonic()+10)
+        self.assertIsInstance(response, SuccessResponse)
+        self.assertEqual(calls, [0])
+        self.assertFalse(self.transport._buffer)
+
     def test_prebuffered_stale_future_and_duplicate_responses_fail_closed(self):
         cases = ((1, 1), (3, 2), (1, 2))
         for buffered_id, request_id in cases:

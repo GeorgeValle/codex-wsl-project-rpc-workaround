@@ -137,12 +137,18 @@ class _StreamTransport:
 
     def _reject_preexisting_input(self) -> None:
         """Nonblockingly drain input that predates a request and fail closed."""
+        self._reject_received_input(
+            "preexisting incomplete frame", self._reject_preexisting_frames, reject_eof=True)
+
+    def _reject_received_input(self, incomplete_message: str,
+                               reject_frames: Callable[[], None], *, reject_eof: bool) -> None:
+        """Drain immediately readable input, classify frames, and reject leftovers."""
         while True:
-            self._reject_preexisting_frames()
+            reject_frames()
             events = self._selector.select(0)
             if not events:
                 if self._buffer:
-                    raise TransportError("preexisting incomplete frame")
+                    raise TransportError(incomplete_message)
                 return
             for key, _ in events:
                 try:
@@ -161,8 +167,9 @@ class _StreamTransport:
                 elif not chunk:
                     self._selector.unregister(key.fileobj)
                     if self._buffer:
-                        raise TransportError("preexisting incomplete frame")
-                    raise TransportError("early EOF")
+                        raise TransportError(incomplete_message)
+                    if reject_eof:
+                        raise TransportError("early EOF")
                 else:
                     self._stdout_total += len(chunk)
                     if self._stdout_total > MAX_STDOUT_SESSION:
@@ -182,7 +189,11 @@ class _StreamTransport:
                 raise TransportError("response correlation error")
 
     def _reject_trailing_frames(self) -> None:
-        """Process complete buffered notifications and reject every other frame."""
+        """Drain and classify all already-received input before final success."""
+        self._reject_received_input(
+            "trailing incomplete frame", self._reject_buffered_trailing_frames, reject_eof=False)
+
+    def _reject_buffered_trailing_frames(self) -> None:
         while (frame := self._take_frame()) is not None:
             envelope = self._decode(frame)
             if isinstance(envelope, Notification):
