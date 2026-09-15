@@ -1,9 +1,12 @@
 """Offline orchestration tests using an injected fake process."""
 from __future__ import annotations
-import json, os, stat, sys, tempfile, threading, unittest
+import json, os, stat, subprocess, sys, tempfile, threading, unittest
 from pathlib import Path
+from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from codex_wsl_rpc.integration import IntegrationAuthorization, ReadOnlyProjectListClient
+from codex_wsl_rpc.integration import IntegrationAuthorization, IntegrationError, ReadOnlyProjectListClient
+from codex_wsl_rpc.integration.transport import TransportError
+from codex_wsl_rpc.protocol import SuccessResponse
 
 class _Stream:
     def __init__(self, fd): self.fd=fd
@@ -30,6 +33,28 @@ class FakeProcess:
     def terminate(self): pass
     def kill(self): pass
 
+class CleanupProcess:
+    def __init__(self, waits):
+        self.stdin=mock.Mock(); self.returncode=None; self.waits=iter(waits)
+        self.terminate=mock.Mock(); self.kill=mock.Mock()
+    def wait(self, timeout):
+        result=next(self.waits)
+        if isinstance(result, BaseException): raise result
+        self.returncode=result
+        return result
+
+class ScriptedTransport:
+    def __init__(self, failure_at): self.failure_at=failure_at; self.step=0
+    def _advance(self):
+        self.step += 1
+        if self.step == self.failure_at: raise TransportError("/private/path secret project data")
+    def send(self, message, deadline): self._advance()
+    def receive_response(self, request_id, deadline):
+        self._advance()
+        if request_id == 1:
+            return SuccessResponse(1, {"userAgent":"private", "codexHome":"/private", "platformFamily":"unix", "platformOs":"linux"})
+    def close(self): pass
+
 def project(name="secret", roots=None):
     return {"id":"private-id","name":name,"roots":roots or [],"metadata":{"secret":"value"},"position":1,"createdAt":2,"updatedAt":3,"recencyAt":None}
 
@@ -50,5 +75,49 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(result.summary.returned_page_count,1); self.assertTrue(result.summary.has_more)
     def test_empty_page(self):
         result,_=self._run([]); self.assertEqual(result.summary.returned_page_count,0); self.assertFalse(result.summary.has_more)
+
+    def test_cleanup_tracks_graceful_terminate_and_kill(self):
+        cases=(
+            ([0], "graceful", 0, 0),
+            ([subprocess.TimeoutExpired("fake", 1), 0], "terminated_owned_child", 1, 0),
+            ([subprocess.TimeoutExpired("fake", 1), subprocess.TimeoutExpired("fake", 1), 0], "killed_owned_child", 1, 1),
+        )
+        for waits, expected, terminates, kills in cases:
+            with self.subTest(expected=expected):
+                process=CleanupProcess(waits)
+                self.assertEqual(ReadOnlyProjectListClient._cleanup(process, None), expected)
+                self.assertEqual(process.terminate.call_count, terminates)
+                self.assertEqual(process.kill.call_count, kills)
+
+    def test_cleanup_raises_when_owned_child_cannot_be_reaped(self):
+        process=CleanupProcess([subprocess.TimeoutExpired("fake", 1)] * 3)
+        with self.assertRaisesRegex(IntegrationError, "owned-child cleanup failed"):
+            ReadOnlyProjectListClient._cleanup(process, None)
+        process.terminate.assert_called_once_with(); process.kill.assert_called_once_with()
+
+    def test_summary_reports_actual_forced_cleanup(self):
+        fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":"/private","platformFamily":"unix","platformOs":"linux"}}, {"id":2,"result":{"data":[],"nextCursor":None}}])
+        original_wait=fake.wait; calls=0
+        def wait(timeout):
+            nonlocal calls
+            calls += 1
+            if calls == 1: raise subprocess.TimeoutExpired("fake", timeout)
+            return original_wait(timeout)
+        fake.wait=wait
+        client=ReadOnlyProjectListClient(executable_path=self.exe,home_path=self.home,authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,_popen=lambda *a,**k: fake)
+        self.assertEqual(client.list_one_page().summary.cleanup_outcome, "terminated_owned_child")
+
+    def test_transport_failures_use_explicit_safe_phase(self):
+        expected={1:"initialize", 2:"initialize", 3:"initialize", 4:"project/list", 5:"project/list"}
+        for failure_at, category in expected.items():
+            with self.subTest(failure_at=failure_at):
+                process=CleanupProcess([0])
+                transport=ScriptedTransport(failure_at)
+                with mock.patch("codex_wsl_rpc.integration.client._StreamTransport", return_value=transport):
+                    client=ReadOnlyProjectListClient(executable_path=self.exe,home_path=self.home,authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,_popen=lambda *a,**k: process)
+                    with self.assertRaises(IntegrationError) as caught: client.list_one_page()
+                rendered=str(caught.exception)
+                self.assertEqual(rendered, f"{category} transport failure")
+                self.assertNotIn("private", rendered); self.assertNotIn("secret", rendered)
 
 if __name__ == "__main__": unittest.main()

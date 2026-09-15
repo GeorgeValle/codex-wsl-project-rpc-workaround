@@ -111,6 +111,7 @@ class ReadOnlyProjectListClient:
         self._validate()
         process = transport = None
         cleanup = "not_started"
+        phase = "startup"
         try:
             try:
                 process = self._popen(
@@ -125,7 +126,9 @@ class ReadOnlyProjectListClient:
             transport = _StreamTransport(process, clock=self._clock)
             init_deadline = self._clock() + INITIALIZE_TIMEOUT
             params = InitializeParams(ClientInfo("codex-wsl-rpc-read-only", "1"), InitializeCapabilities(experimental_api=True))
+            phase = "initialize_send"
             transport.send(Request(1, "initialize", params.to_wire()), init_deadline)
+            phase = "initialize_wait"
             response = transport.receive_response(1, init_deadline)
             if isinstance(response, ErrorResponse):
                 raise InitializeError("initialize protocol error")
@@ -133,10 +136,13 @@ class ReadOnlyProjectListClient:
                 raise InitializeError("initialize protocol error")
             try: initialized = InitializeResponse.from_wire(response.result)
             except ValueError as error: raise InitializeError("initialize protocol error") from error
+            phase = "initialized_send"
             transport.send(Notification("initialized"), init_deadline)
             list_deadline = self._clock() + PROJECT_LIST_TIMEOUT
             list_params = ProjectListParams(None, 25, ProjectSortKey.POSITION, SortDirection.ASC)
+            phase = "project_list_send"
             transport.send(Request(2, "project/list", list_params.to_wire()), list_deadline)
+            phase = "project_list_wait"
             response = transport.receive_response(2, list_deadline)
             if isinstance(response, ErrorResponse):
                 category = "project store unavailable" if response.error.code == -32601 else "project/list protocol error"
@@ -145,6 +151,7 @@ class ReadOnlyProjectListClient:
             try: page = ProjectListResponse.from_wire(response.result)
             except ValueError as error: raise ProjectListError("project/list protocol error") from error
             categories = tuple(sorted({_root_category(root.path) for project in page.data for root in project.roots}))
+            phase = "cleanup"
             cleanup = self._cleanup(process, transport)
             process = transport = None
             summary = ProjectListRunSummary(PINNED_CODEX_SHA, datetime.now(timezone.utc).isoformat(),
@@ -156,8 +163,8 @@ class ReadOnlyProjectListClient:
         except KeyboardInterrupt as error:
             raise OperatorCancelledError("operator cancelled") from error
         except TransportError as error:
-            phase = "project/list" if process is not None else "initialize"
-            raise IntegrationError(f"{phase} transport failure: {error}") from error
+            category = "initialize" if phase in {"initialize_send", "initialize_wait", "initialized_send"} else "project/list"
+            raise IntegrationError(f"{category} transport failure") from error
         finally:
             if process is not None:
                 self._cleanup(process, transport)
@@ -165,6 +172,7 @@ class ReadOnlyProjectListClient:
     @staticmethod
     def _cleanup(process, transport) -> str:
         failures = []
+        outcome = "graceful"
         if transport is not None:
             try: transport.close()
             except Exception: failures.append("transport")
@@ -173,12 +181,18 @@ class ReadOnlyProjectListClient:
         try:
             process.wait(timeout=CLOSE_TIMEOUT)
         except subprocess.TimeoutExpired:
-            process.terminate()
+            outcome = "terminated_owned_child"
+            try: process.terminate()
+            except Exception: failures.append("terminate")
             try: process.wait(timeout=TERMINATE_TIMEOUT)
             except subprocess.TimeoutExpired:
-                process.kill()
+                outcome = "killed_owned_child"
+                try: process.kill()
+                except Exception: failures.append("kill")
                 try: process.wait(timeout=KILL_TIMEOUT)
                 except subprocess.TimeoutExpired: failures.append("reap")
+                except Exception: failures.append("wait")
+            except Exception: failures.append("wait")
         except Exception: failures.append("wait")
         if failures: raise CleanupError("owned-child cleanup failed")
-        return "graceful" if process.returncode is not None else "reaped"
+        return outcome

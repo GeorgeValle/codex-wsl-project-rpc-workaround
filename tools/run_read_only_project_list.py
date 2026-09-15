@@ -3,6 +3,11 @@
 from __future__ import annotations
 import argparse, json
 from pathlib import Path
+import sys
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
+
 from codex_wsl_rpc.integration import IntegrationAuthorization, IntegrationError, ReadOnlyProjectListClient
 
 def main() -> int:
