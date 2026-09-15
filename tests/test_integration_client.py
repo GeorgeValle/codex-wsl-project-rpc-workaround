@@ -5,7 +5,8 @@ from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from codex_wsl_rpc.integration import IntegrationAuthorization, IntegrationError, ReadOnlyProjectListClient
-from codex_wsl_rpc.integration.client import CleanupError, PINNED_CODEX_SHA, UnsupportedPlatformError
+from codex_wsl_rpc.integration.client import (CleanupError, OperatorCancelledError,
+    PINNED_CODEX_SHA, UnsupportedPlatformError, _OwnedChildCleanup)
 from codex_wsl_rpc.integration.transport import TransportError
 from codex_wsl_rpc.protocol import SuccessResponse
 
@@ -132,14 +133,16 @@ class ClientTests(unittest.TestCase):
         for waits, expected, terminates, kills in cases:
             with self.subTest(expected=expected):
                 process=CleanupProcess(waits)
-                self.assertEqual(ReadOnlyProjectListClient._cleanup(process, None), expected)
+                state = _OwnedChildCleanup(process, None)
+                self.assertEqual(ReadOnlyProjectListClient._cleanup(state), expected)
+                self.assertTrue(state.completed)
                 self.assertEqual(process.terminate.call_count, terminates)
                 self.assertEqual(process.kill.call_count, kills)
 
     def test_cleanup_raises_when_owned_child_cannot_be_reaped(self):
         process=CleanupProcess([subprocess.TimeoutExpired("fake", 1)] * 3)
         with self.assertRaisesRegex(IntegrationError, "owned-child cleanup failed"):
-            ReadOnlyProjectListClient._cleanup(process, None)
+            ReadOnlyProjectListClient._cleanup(_OwnedChildCleanup(process, None))
         process.terminate.assert_called_once_with(); process.kill.assert_called_once_with()
 
     def test_summary_reports_actual_forced_cleanup(self):
@@ -158,7 +161,10 @@ class ClientTests(unittest.TestCase):
         fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":"/private","platformFamily":"unix","platformOs":"linux"}}, {"id":2,"result":{"data":[],"nextCursor":None}}])
         client=self._client(_popen=lambda *a,**k: fake)
         primary=CleanupError("owned-child cleanup failed")
-        with mock.patch.object(client, "_cleanup", side_effect=primary) as cleanup:
+        def fail_cleanup(state):
+            state.started = True
+            raise primary
+        with mock.patch.object(client, "_cleanup", side_effect=fail_cleanup) as cleanup:
             with self.assertRaises(CleanupError) as caught: client.list_one_page()
         self.assertIs(caught.exception, primary); cleanup.assert_called_once()
 
@@ -168,9 +174,45 @@ class ClientTests(unittest.TestCase):
                 process=CleanupProcess([0]); transport=mock.Mock()
                 transport.send.side_effect=failure
                 client=self._client(_popen=lambda *a,**k: process)
-                with mock.patch("codex_wsl_rpc.integration.client._StreamTransport", return_value=transport), mock.patch.object(client, "_cleanup", return_value="graceful") as cleanup:
+                with mock.patch("codex_wsl_rpc.integration.client._StreamTransport", return_value=transport), mock.patch.object(client, "_cleanup", wraps=client._cleanup) as cleanup:
                     with self.assertRaises(IntegrationError): client.list_one_page()
-                cleanup.assert_called_once_with(process, transport)
+                cleanup.assert_called_once()
+                state = cleanup.call_args.args[0]
+                self.assertTrue(state.completed)
+                self.assertIsNone(state.process)
+
+    def test_interrupted_cleanup_retains_ownership_and_never_repeats_signals(self):
+        cases = (
+            ([KeyboardInterrupt(), 0], 0, 0),
+            ([subprocess.TimeoutExpired("fake", 1), KeyboardInterrupt(), 0], 1, 0),
+            ([subprocess.TimeoutExpired("fake", 1), subprocess.TimeoutExpired("fake", 1), KeyboardInterrupt(), 0], 1, 1),
+        )
+        for waits, terminates, kills in cases:
+            with self.subTest(terminates=terminates, kills=kills):
+                process = CleanupProcess(waits)
+                state = _OwnedChildCleanup(process, None)
+                with self.assertRaises(OperatorCancelledError):
+                    ReadOnlyProjectListClient._cleanup(state)
+                self.assertTrue(state.started)
+                self.assertTrue(state.completed)
+                self.assertIsNone(state.process)
+                self.assertEqual(process.terminate.call_count, terminates)
+                self.assertEqual(process.kill.call_count, kills)
+
+    def test_cleanup_error_wins_over_interruption_without_second_attempt(self):
+        process = CleanupProcess([
+            subprocess.TimeoutExpired("fake", 1),
+            subprocess.TimeoutExpired("fake", 1),
+            KeyboardInterrupt(),
+            subprocess.TimeoutExpired("fake", 1),
+        ])
+        state = _OwnedChildCleanup(process, None)
+        with self.assertRaises(CleanupError):
+            ReadOnlyProjectListClient._cleanup(state)
+        self.assertTrue(state.started)
+        self.assertFalse(state.completed)
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
 
     def test_method_not_found_remains_ambiguous_and_private(self):
         fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":"/private","platformFamily":"unix","platformOs":"linux"}}, {"id":2,"error":{"code":-32601,"message":"secret method or store detail","data":{"path":"/private/project"}}}])

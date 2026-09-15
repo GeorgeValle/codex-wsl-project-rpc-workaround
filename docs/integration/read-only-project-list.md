@@ -64,6 +64,16 @@ only the exact owned `Popen` child if needed. It never enumerates processes,
 kills by name/group, or touches Desktop processes. It cannot promise cleanup of
 arbitrary descendants.
 
+Ctrl+C handling is validation-runner lifecycle hardening, not a final UI
+requirement: end users are not expected to use or be shown terminal cancellation
+in the final interface. The temporary terminal-based Phase B validation runner
+retains ownership through interrupted cleanup and finishes bounded cleanup of
+only its exact child before reporting cancellation. This safeguard matters for
+the large offline/manual regression suite (already well over one hundred tests,
+and expected to exceed roughly 170 checks/tests as validation hardening grows),
+because an orphaned owned app-server could interfere with subsequent tests,
+manual validation, or the user's Codex environment.
+
 ## Pinned source provenance
 
 Behavior is modeled at public OpenAI Codex revision

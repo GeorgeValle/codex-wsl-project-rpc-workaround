@@ -169,4 +169,24 @@ class TransportTests(unittest.TestCase):
         with self.assertRaisesRegex(TransportError, "^malformed envelope$"):
             self.transport._decode(b'{}')
 
+    def test_deep_valid_json_recursion_is_malformed_envelope(self):
+        nested = '[]'
+        for _ in range(500):
+            nested = '[' + nested + ']'
+        frame = ('{"id":1,"result":' + nested + '}').encode()
+        with self.assertRaisesRegex(TransportError, "^malformed envelope$"):
+            self.transport._decode(frame)
+
+    def test_parse_envelope_recursion_never_escapes(self):
+        with mock.patch("codex_wsl_rpc.integration.transport.parse_envelope", side_effect=RecursionError):
+            with self.assertRaisesRegex(TransportError, "^malformed envelope$"):
+                self.transport._decode(b'{"id":1,"result":{}}')
+
+    def test_valid_nested_envelope_below_recursion_threshold_parses(self):
+        nested = []
+        for _ in range(20):
+            nested = [nested]
+        frame = json.dumps({"id": 1, "result": nested}).encode()
+        self.assertIsInstance(self.transport._decode(frame), SuccessResponse)
+
 if __name__ == "__main__": unittest.main()

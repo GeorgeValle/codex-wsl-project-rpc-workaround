@@ -194,7 +194,7 @@ class _StreamTransport:
             raise TransportError("malformed JSON") from error
         try:
             return parse_envelope(value)
-        except (ValueError, TypeError) as error:
+        except (ValueError, TypeError, RecursionError) as error:
             raise TransportError("malformed envelope") from error
 
     def _accept_notification(self, notification: Notification, size: int) -> None:

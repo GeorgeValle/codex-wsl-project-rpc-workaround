@@ -79,6 +79,16 @@ class ProjectListRunSummary:
 class ProjectListRunResult:
     summary: ProjectListRunSummary
 
+@dataclass(slots=True)
+class _OwnedChildCleanup:
+    process: object | None
+    transport: object | None
+    started: bool = False
+    completed: bool = False
+    terminate_issued: bool = False
+    kill_issued: bool = False
+    interrupted: bool = False
+
 def _path_category(path: str) -> str:
     if not path: return "empty"
     if path.startswith("\\\\"): return "unc_absolute"
@@ -140,6 +150,7 @@ class ReadOnlyProjectListClient:
     def list_one_page(self) -> ProjectListRunResult:
         self._validate()
         process = transport = None
+        owned_child = None
         cleanup = "not_started"
         phase = "startup"
         try:
@@ -154,6 +165,7 @@ class ReadOnlyProjectListClient:
             except OSError as error:
                 raise StartupError("app-server startup failed") from error
             transport = _StreamTransport(process, clock=self._clock)
+            owned_child = _OwnedChildCleanup(process, transport)
             init_deadline = self._clock() + INITIALIZE_TIMEOUT
             params = InitializeParams(ClientInfo("codex-wsl-rpc-read-only", "1"), InitializeCapabilities(experimental_api=True))
             phase = "initialize_send"
@@ -183,9 +195,8 @@ class ReadOnlyProjectListClient:
             except ValueError as error: raise ProjectListError("project/list protocol error") from error
             categories = tuple(sorted({_path_category(root.path) for project in page.data for root in project.roots}))
             phase = "cleanup"
-            owned_process, owned_transport = process, transport
+            cleanup = self._cleanup(owned_child)
             process = transport = None
-            cleanup = self._cleanup(owned_process, owned_transport)
             summary = ProjectListRunSummary(PINNED_CODEX_SHA, datetime.now(timezone.utc).isoformat(),
                 "operator_confirmed_openai_codex_unverified_by_repository", "NOT_ESTABLISHED",
                 "unobserved", initialized.platform_family,
@@ -202,33 +213,65 @@ class ReadOnlyProjectListClient:
                 category=f"{category.replace('/', '_')}_transport_failure",
             ) from error
         finally:
-            if process is not None:
-                self._cleanup(process, transport)
+            if owned_child is not None and not owned_child.started:
+                self._cleanup(owned_child)
 
     @staticmethod
-    def _cleanup(process, transport) -> str:
+    def _cleanup(owned_child: _OwnedChildCleanup) -> str:
+        """Finish one bounded cleanup lifecycle, deferring Ctrl+C until reap."""
+        if owned_child.started:
+            if owned_child.completed:
+                raise CleanupError("owned-child cleanup already completed")
+            raise CleanupError("owned-child cleanup already attempted")
+        owned_child.started = True
+        process = owned_child.process
+        transport = owned_child.transport
         failures = []
         outcome = "graceful"
         if transport is not None:
             try: transport.close()
+            except KeyboardInterrupt: owned_child.interrupted = True
             except Exception: failures.append("transport")
         try: process.stdin.close()
+        except KeyboardInterrupt: owned_child.interrupted = True
         except Exception: failures.append("stdin")
-        try:
-            process.wait(timeout=CLOSE_TIMEOUT)
-        except subprocess.TimeoutExpired:
+
+        def wait_until_finished(timeout: float) -> bool:
+            while True:
+                try:
+                    process.wait(timeout=timeout)
+                    return True
+                except KeyboardInterrupt:
+                    owned_child.interrupted = True
+                    if process.returncode is not None:
+                        return True
+                except subprocess.TimeoutExpired:
+                    return False
+                except Exception:
+                    failures.append("wait")
+                    return False
+
+        reaped = wait_until_finished(CLOSE_TIMEOUT)
+        if not reaped and not failures:
             outcome = "terminated_owned_child"
+            owned_child.terminate_issued = True
             try: process.terminate()
+            except KeyboardInterrupt: owned_child.interrupted = True
             except Exception: failures.append("terminate")
-            try: process.wait(timeout=TERMINATE_TIMEOUT)
-            except subprocess.TimeoutExpired:
+            reaped = wait_until_finished(TERMINATE_TIMEOUT)
+            if not reaped and not failures:
                 outcome = "killed_owned_child"
+                owned_child.kill_issued = True
                 try: process.kill()
+                except KeyboardInterrupt: owned_child.interrupted = True
                 except Exception: failures.append("kill")
-                try: process.wait(timeout=KILL_TIMEOUT)
-                except subprocess.TimeoutExpired: failures.append("reap")
-                except Exception: failures.append("wait")
-            except Exception: failures.append("wait")
-        except Exception: failures.append("wait")
+                reaped = wait_until_finished(KILL_TIMEOUT)
+                if not reaped and not failures:
+                    failures.append("reap")
         if failures: raise CleanupError("owned-child cleanup failed")
+        owned_child.completed = True
+        owned_child.process = None
+        owned_child.transport = None
+        if owned_child.interrupted:
+            raise OperatorCancelledError("operator cancelled")
         return outcome
