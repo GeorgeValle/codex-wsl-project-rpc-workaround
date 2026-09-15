@@ -40,10 +40,14 @@ proxy, token, credential, or arbitrary `CODEX_*` value is copied.
 
 ## Wire, stream, and limits
 
-The application-controlled writer accepts only `initialize` request ID 1,
-parameterless `initialized`, and `project/list` request ID 2. Initialize asks
-only for `experimentalApi=true`; listing fixes `cursor=null`, `limit=25`,
-`sortKey=position`, and `sortDirection=asc`. It never follows `nextCursor`.
+The application-controlled writer accepts only `initialize`, parameterless
+`initialized`, and `project/list`. Each request uses a fresh, unpredictable,
+high-entropy string RequestId; the two IDs are unique within a run and responses
+must match the exact generated ID. Tests may inject a deterministic generator.
+Runtime IDs contain no user data, paths, project data, or secrets and are not
+included in safe evidence. Initialize asks only for `experimentalApi=true`;
+listing fixes `cursor=null`, `limit=25`, `sortKey=position`, and
+`sortDirection=asc`. It never follows `nextCursor`.
 
 Nonblocking pipes, selectors, partial writes, incremental byte buffering, and
 monotonic phase deadlines handle fragmented UTF-8, partial/multiple lines, EOF,

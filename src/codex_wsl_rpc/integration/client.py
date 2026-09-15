@@ -286,92 +286,103 @@ class ReadOnlyProjectListClient:
 
     def _cleanup(self, owned_child: _OwnedChildCleanup) -> str:
         """Finish one bounded cleanup lifecycle, deferring Ctrl+C until reap."""
-        if owned_child.started:
-            if owned_child.completed:
-                raise CleanupError("owned-child cleanup already completed")
-            raise CleanupError("owned-child cleanup already attempted")
-        owned_child.started = True
-        process, transport = owned_child.process, owned_child.transport
-        failures: list[str] = []
-        outcome, state, deadline = "graceful", "transport_close", None
-        stage_timeout = CLOSE_TIMEOUT
-        reaped = False
+        previous_mask = self._sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+        terminal_error: CleanupError | None = None
+        outcome = "graceful"
+        try:
+            if owned_child.started:
+                if owned_child.completed:
+                    raise CleanupError("owned-child cleanup already completed")
+                raise CleanupError("owned-child cleanup already attempted")
+            owned_child.started = True
+            process, transport = owned_child.process, owned_child.transport
+            failures: list[str] = []
+            outcome, state, deadline = "graceful", "transport_close", None
+            stage_timeout = CLOSE_TIMEOUT
+            reaped = False
 
-        # Keep every transition behind one interrupt barrier. Advancing before
-        # one-shot operations prevents duplicate closes/signals, while a stage's
-        # deadline is created once and retained across interrupted clock/wait
-        # operations.
-        while state != "terminal":
-            try:
-                if state == "transport_close":
-                    state = "stdin_close"
-                    if transport is not None:
-                        try: transport.close()
-                        except Exception: failures.append("transport")
-                elif state == "stdin_close":
-                    state = "deadline"
-                    try: process.stdin.close()
-                    except Exception: failures.append("stdin")
-                elif state == "deadline":
-                    deadline = self._clock() + stage_timeout
-                    state = "wait"
-                elif state == "wait":
-                    remaining = deadline - self._clock()
-                    if remaining <= 0:
-                        reaped = process.returncode is not None
-                    else:
-                        try:
-                            process.wait(timeout=remaining)
-                            reaped = True
-                        except subprocess.TimeoutExpired:
-                            reaped = False
-                        except Exception:
-                            failures.append("wait")
+        # SIGINT stays blocked across every state transition.  The local catch
+        # remains only for deterministic injected exceptions in tests; real
+        # terminal cancellation cannot interrupt its own bookkeeping.
+            while state != "terminal":
+                try:
+                    if state == "transport_close":
+                        state = "stdin_close"
+                        if transport is not None:
+                            try: transport.close()
+                            except Exception: failures.append("transport")
+                    elif state == "stdin_close":
+                        state = "deadline"
+                        try: process.stdin.close()
+                        except Exception: failures.append("stdin")
+                    elif state == "deadline":
+                        deadline = self._clock() + stage_timeout
+                        state = "wait"
+                    elif state == "wait":
+                        remaining = deadline - self._clock()
+                        if remaining <= 0:
                             reaped = process.returncode is not None
-                    if reaped:
-                        state = "finalize"
-                    elif (owned_child.terminate_state is not _SignalDelivery.DELIVERED and
-                          owned_child.terminate_attempts < 2):
-                        outcome, state = "terminated_owned_child", "terminate"
-                    elif (owned_child.kill_state is not _SignalDelivery.DELIVERED and
-                          owned_child.kill_attempts < 2):
-                        outcome, state = "killed_owned_child", "kill"
-                    else:
-                        failures.append("reap")
-                        state = "finalize"
-                elif state == "terminate":
-                    owned_child.terminate_attempts += 1
-                    owned_child.terminate_state = _SignalDelivery.DELIVERY_UNCERTAIN
-                    state = "terminate_deadline"
-                    try:
-                        process.terminate()
-                        owned_child.terminate_state = _SignalDelivery.DELIVERED
-                    except KeyboardInterrupt:
-                        owned_child.interrupted = True
-                    except Exception: failures.append("terminate")
-                elif state == "terminate_deadline":
-                    stage_timeout, state = TERMINATE_TIMEOUT, "deadline"
-                elif state == "kill":
-                    owned_child.kill_attempts += 1
-                    owned_child.kill_state = _SignalDelivery.DELIVERY_UNCERTAIN
-                    state = "kill_deadline"
-                    try:
-                        process.kill()
-                        owned_child.kill_state = _SignalDelivery.DELIVERED
-                    except KeyboardInterrupt:
-                        owned_child.interrupted = True
-                    except Exception: failures.append("kill")
-                elif state == "kill_deadline":
-                    stage_timeout, state = KILL_TIMEOUT, "deadline"
-                elif state == "finalize":
-                    if reaped:
-                        owned_child.completed = True
-                        owned_child.process = None
-                        owned_child.transport = None
-                    state = "terminal"
+                        else:
+                            try:
+                                process.wait(timeout=remaining)
+                                reaped = True
+                            except subprocess.TimeoutExpired:
+                                reaped = False
+                            except Exception:
+                                failures.append("wait")
+                                reaped = process.returncode is not None
+                        if reaped:
+                            state = "finalize"
+                        elif (owned_child.terminate_state is not _SignalDelivery.DELIVERED and
+                              owned_child.terminate_attempts < 2):
+                            outcome, state = "terminated_owned_child", "terminate"
+                        elif (owned_child.kill_state is not _SignalDelivery.DELIVERED and
+                              owned_child.kill_attempts < 2):
+                            outcome, state = "killed_owned_child", "kill"
+                        else:
+                            failures.append("reap")
+                            state = "finalize"
+                    elif state == "terminate":
+                        owned_child.terminate_attempts += 1
+                        owned_child.terminate_state = _SignalDelivery.DELIVERY_UNCERTAIN
+                        state = "terminate_deadline"
+                        try:
+                            process.terminate()
+                            owned_child.terminate_state = _SignalDelivery.DELIVERED
+                        except KeyboardInterrupt:
+                            owned_child.interrupted = True
+                        except Exception: failures.append("terminate")
+                    elif state == "terminate_deadline":
+                        stage_timeout, state = TERMINATE_TIMEOUT, "deadline"
+                    elif state == "kill":
+                        owned_child.kill_attempts += 1
+                        owned_child.kill_state = _SignalDelivery.DELIVERY_UNCERTAIN
+                        state = "kill_deadline"
+                        try:
+                            process.kill()
+                            owned_child.kill_state = _SignalDelivery.DELIVERED
+                        except KeyboardInterrupt:
+                            owned_child.interrupted = True
+                        except Exception: failures.append("kill")
+                    elif state == "kill_deadline":
+                        stage_timeout, state = KILL_TIMEOUT, "deadline"
+                    elif state == "finalize":
+                        if reaped:
+                            owned_child.completed = True
+                            owned_child.process = None
+                            owned_child.transport = None
+                        state = "terminal"
+                except KeyboardInterrupt:
+                    owned_child.interrupted = True
+            if failures:
+                terminal_error = CleanupError("owned-child cleanup failed")
+        finally:
+            try:
+                self._sigmask(signal.SIG_SETMASK, previous_mask)
             except KeyboardInterrupt:
                 owned_child.interrupted = True
-        if failures: raise CleanupError("owned-child cleanup failed")
+        if terminal_error is not None:
+            raise terminal_error
         if owned_child.interrupted:
             raise OperatorCancelledError("operator cancelled")
         return outcome

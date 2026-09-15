@@ -100,6 +100,7 @@ class _StreamTransport:
                     raise TransportError("unexpected server request")
                 if type(envelope.id) is not type(expected_id) or envelope.id != expected_id:
                     raise TransportError("response correlation error")
+                self._reject_trailing_frames()
                 self._outstanding_request_id = None
                 return envelope
             remaining = deadline - self._clock()
@@ -171,6 +172,17 @@ class _StreamTransport:
                         raise TransportError("stdout frame limit")
 
     def _reject_preexisting_frames(self) -> None:
+        while (frame := self._take_frame()) is not None:
+            envelope = self._decode(frame)
+            if isinstance(envelope, Notification):
+                self._accept_notification(envelope, len(frame))
+            elif isinstance(envelope, Request):
+                raise TransportError("unexpected server request")
+            else:
+                raise TransportError("response correlation error")
+
+    def _reject_trailing_frames(self) -> None:
+        """Process complete buffered notifications and reject every other frame."""
         while (frame := self._take_frame()) is not None:
             envelope = self._decode(frame)
             if isinstance(envelope, Notification):

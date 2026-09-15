@@ -150,7 +150,8 @@ class ClientTests(unittest.TestCase):
             client.list_one_page()
         fake.stdin.close.assert_called_once_with()
         self.assertEqual([operation for operation, _ in masks],
-                         [signal.SIG_BLOCK, signal.SIG_SETMASK])
+                         [signal.SIG_BLOCK, signal.SIG_SETMASK,
+                          signal.SIG_BLOCK, signal.SIG_SETMASK])
 
     def test_platform_values_are_reduced_to_safe_reviewed_categories(self):
         cases = (
@@ -256,6 +257,55 @@ class ClientTests(unittest.TestCase):
                 self.assertTrue(state.completed)
                 self.assertEqual(process.terminate.call_count, terminates)
                 self.assertEqual(process.kill.call_count, kills)
+
+    def test_cleanup_masks_sigint_through_final_bookkeeping_and_restores(self):
+        blocked = False
+        events = []
+        def sigmask(operation, mask):
+            nonlocal blocked
+            events.append((operation, blocked))
+            if operation == signal.SIG_BLOCK:
+                blocked = True
+                return {signal.SIGTERM}
+            self.assertTrue(blocked)
+            self.assertEqual(mask, {signal.SIGTERM})
+            blocked = False
+        process = CleanupProcess([
+            subprocess.TimeoutExpired("fake", 1),
+            subprocess.TimeoutExpired("fake", 1),
+            0,
+        ])
+        process.stdin.close.side_effect = lambda: self.assertTrue(blocked)
+        process.terminate.side_effect = lambda: self.assertTrue(blocked)
+        process.kill.side_effect = lambda: self.assertTrue(blocked)
+        transport = mock.Mock()
+        transport.close.side_effect = lambda: self.assertTrue(blocked)
+        state = _OwnedChildCleanup(process, transport)
+        self.assertEqual(self._client(_sigmask=sigmask)._cleanup(state),
+                         "killed_owned_child")
+        self.assertTrue(state.completed)
+        self.assertFalse(blocked)
+        self.assertEqual([event[0] for event in events],
+                         [signal.SIG_BLOCK, signal.SIG_SETMASK])
+
+    def test_cleanup_restores_mask_before_deferred_cancel_and_after_failure(self):
+        for waits, expected in (([0], OperatorCancelledError),
+                                ([subprocess.TimeoutExpired("fake", 1)] * 3, CleanupError)):
+            with self.subTest(expected=expected.__name__):
+                restored = False
+                def sigmask(operation, mask):
+                    nonlocal restored
+                    if operation == signal.SIG_BLOCK:
+                        return set()
+                    restored = True
+                    if expected is OperatorCancelledError:
+                        raise KeyboardInterrupt()
+                state = _OwnedChildCleanup(CleanupProcess(waits), None)
+                with self.assertRaises(expected):
+                    self._client(_sigmask=sigmask)._cleanup(state)
+                self.assertTrue(restored)
+                if expected is OperatorCancelledError:
+                    self.assertTrue(state.completed)
 
     def test_cleanup_raises_when_owned_child_cannot_be_reaped(self):
         process=CleanupProcess([subprocess.TimeoutExpired("fake", 1)] * 3)

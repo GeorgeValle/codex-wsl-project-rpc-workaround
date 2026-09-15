@@ -87,9 +87,8 @@ class TransportTests(unittest.TestCase):
     def test_future_response_in_same_read_cannot_satisfy_later_request(self):
         self._send_request(1, "initialize")
         os.write(self.process.stdout_writer, b'{"id":1,"result":{}}\n{"id":2,"result":{}}\n')
-        self.assertIsInstance(self.transport.receive_response(1, time.monotonic()+10), SuccessResponse)
         with self.assertRaisesRegex(TransportError, "correlation"):
-            self._send_request(2, "project/list")
+            self.transport.receive_response(1, time.monotonic()+10)
 
     def test_pipe_buffered_future_response_is_rejected_before_request(self):
         self._send_request(1, "initialize")
@@ -107,9 +106,41 @@ class TransportTests(unittest.TestCase):
     def test_duplicate_response_cannot_survive_until_next_request(self):
         self._send_request(1, "initialize")
         os.write(self.process.stdout_writer, b'{"id":1,"result":{}}\n{"id":1,"result":{}}\n')
-        self.assertIsInstance(self.transport.receive_response(1, time.monotonic()+10), SuccessResponse)
         with self.assertRaisesRegex(TransportError, "correlation"):
-            self._send_request(2, "project/list")
+            self.transport.receive_response(1, time.monotonic()+10)
+
+    def test_complete_trailing_frames_are_validated_before_response_returns(self):
+        cases = (
+            (b'{"id":"expected","result":{}}\n', "correlation"),
+            (b'{"id":"stale","result":{}}\n', "correlation"),
+            (b'{"id":"future","result":{}}\n', "correlation"),
+            (b'{"id":9,"method":"server/call"}\n', "server request"),
+            (b'{"method":"not/allowed"}\n', "notification"),
+            (b'{\n', "JSON"),
+        )
+        for trailing, message in cases:
+            with self.subTest(message=message):
+                process = _Process()
+                transport = _StreamTransport(process)
+                try:
+                    transport.send(Request("expected", "project/list", {}), time.monotonic()+10)
+                    os.read(process.stdin_reader, 4096)
+                    os.write(process.stdout_writer,
+                             b'{"id":"expected","result":{}}\n' + trailing)
+                    with self.assertRaisesRegex(TransportError, message):
+                        transport.receive_response("expected", time.monotonic()+10)
+                finally:
+                    transport.close(); process.stdin.close(); process.stdout.close(); process.stderr.close(); process.close()
+
+    def test_allowed_trailing_notification_is_processed_before_success(self):
+        self._send_request("expected", "project/list")
+        os.write(self.process.stdout_writer,
+                 b'{"id":"expected","result":{}}\n'
+                 b'{"method":"configWarning","params":{}}\n')
+        response = self.transport.receive_response("expected", time.monotonic()+10)
+        self.assertIsInstance(response, SuccessResponse)
+        self.assertEqual(self.transport._notifications, 1)
+        self.assertNotIn(b"\n", self.transport._buffer)
 
     def test_prebuffered_stale_future_and_duplicate_responses_fail_closed(self):
         cases = ((1, 1), (3, 2), (1, 2))
