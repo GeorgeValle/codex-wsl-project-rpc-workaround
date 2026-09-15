@@ -71,8 +71,8 @@ class ClientTests(unittest.TestCase):
             _proc_reader=proc_reader,
             **kwargs,
         )
-    def _run(self,data,next_cursor=None):
-        fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":"/private","platformFamily":"unix","platformOs":"linux"}}, {"id":2,"result":{"data":data,"nextCursor":next_cursor}}])
+    def _run(self,data,next_cursor=None,codex_home="/private"):
+        fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":codex_home,"platformFamily":"unix","platformOs":"linux"}}, {"id":2,"result":{"data":data,"nextCursor":next_cursor}}])
         client=self._client(_popen=lambda *a,**k: fake)
         return client.list_one_page(),fake
     def test_success_exact_sequence_and_safe_summary(self):
@@ -91,6 +91,35 @@ class ClientTests(unittest.TestCase):
         self.assertNotIn("tested_sha", summary); self.assertNotIn("version", summary)
         self.assertIn("unverified", summary["target_provenance"])
         self.assertIn("validates only its executable form", IntegrationAuthorization.READ_ONLY_PROJECT_LIST.value)
+        self.assertEqual(summary["codex_home_category"], "posix_absolute")
+        self.assertNotIn("codex_home", summary)
+
+    def test_codex_home_category_is_derived_without_exposing_raw_path(self):
+        cases = (
+            ("/home/user/.codex", "posix_absolute"),
+            (r"C:\Users\User\.codex", "windows_drive_absolute"),
+            ("C:/Users/User/.codex", "windows_drive_absolute"),
+            (r"\\server\share\codex", "unc_absolute"),
+            ("relative/path", "relative"),
+            ("./codex", "relative"),
+            ("", "empty"),
+        )
+        for codex_home, expected in cases:
+            with self.subTest(codex_home=codex_home, expected=expected):
+                result, _ = self._run([], codex_home=codex_home)
+                safe = result.summary.to_safe_dict()
+                self.assertEqual(safe["codex_home_category"], expected)
+                self.assertNotIn("codex_home", safe)
+                if codex_home:
+                    self.assertNotIn(codex_home, json.dumps(safe))
+
+    def test_personal_codex_home_is_not_exposed_by_safe_summary(self):
+        personal_path = "/home/PersonalUser/private-codex-state"
+        result, _ = self._run([], codex_home=personal_path)
+        safe = json.dumps(result.summary.to_safe_dict())
+        self.assertEqual(result.summary.codex_home_category, "posix_absolute")
+        self.assertNotIn(personal_path, safe)
+        self.assertNotIn("PersonalUser", safe)
     def test_empty_page(self):
         result,_=self._run([]); self.assertEqual(result.summary.returned_page_count,0); self.assertFalse(result.summary.has_more)
 

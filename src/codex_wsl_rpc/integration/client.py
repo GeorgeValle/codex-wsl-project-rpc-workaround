@@ -79,10 +79,14 @@ class ProjectListRunSummary:
 class ProjectListRunResult:
     summary: ProjectListRunSummary
 
-def _root_category(path: str) -> str:
-    if path.startswith("/"): return "posix_absolute"
+def _path_category(path: str) -> str:
+    if not path: return "empty"
     if path.startswith("\\\\"): return "unc_absolute"
-    return "windows_drive_absolute"
+    if path.startswith("/"): return "posix_absolute"
+    drive = path[0] if path else ""
+    if ("A" <= drive <= "Z" or "a" <= drive <= "z") and len(path) >= 3 and path[1] == ":" and path[2] in "/\\":
+        return "windows_drive_absolute"
+    return "relative"
 
 class ReadOnlyProjectListClient:
     def __init__(self, *, executable_path: Path, home_path: Path,
@@ -177,7 +181,7 @@ class ReadOnlyProjectListClient:
             if not isinstance(response, SuccessResponse): raise ProjectListError("project/list protocol error")
             try: page = ProjectListResponse.from_wire(response.result)
             except ValueError as error: raise ProjectListError("project/list protocol error") from error
-            categories = tuple(sorted({_root_category(root.path) for project in page.data for root in project.roots}))
+            categories = tuple(sorted({_path_category(root.path) for project in page.data for root in project.roots}))
             phase = "cleanup"
             owned_process, owned_transport = process, transport
             process = transport = None
@@ -186,7 +190,7 @@ class ReadOnlyProjectListClient:
                 "operator_confirmed_openai_codex_unverified_by_repository", "NOT_ESTABLISHED",
                 "unobserved", initialized.platform_family,
                 initialized.platform_os, True, True, True, True, True,
-                "absolute_path_reported_not_exposed", len(page.data), page.next_cursor is not None,
+                _path_category(initialized.codex_home), len(page.data), page.next_cursor is not None,
                 categories, cleanup)
             return ProjectListRunResult(summary)
         except KeyboardInterrupt as error:
