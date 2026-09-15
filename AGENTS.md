@@ -17,7 +17,12 @@ Agents MUST NOT:
 - read Codex local SQLite state unless a future reviewed phase explicitly
   authorizes it;
 - execute arbitrary shell commands or use `shell=True`;
-- download or execute third-party binaries;
+- download, install, copy into the repository, vendor, upload, automatically
+  discover, search `PATH` for, or execute arbitrary third-party binaries,
+  except that a future, separately human-reviewed real-integration task MAY
+  execute an already-installed OpenAI Codex/app-server solely as the product
+  under test when that task explicitly activates `BIN-002` and all of its
+  constraints are satisfied;
 - add hidden network calls or telemetry;
 - delete Codex Projects, delete user data, or perform destructive filesystem
   operations;
