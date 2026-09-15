@@ -8,7 +8,7 @@ from codex_wsl_rpc.integration import IntegrationAuthorization, IntegrationError
 from codex_wsl_rpc.integration.client import (CleanupError, InvalidTargetError,
     OperatorCancelledError, PINNED_CODEX_SHA, StartupError,
     UnsupportedPlatformError, UnsupportedTargetError, _OwnedChildCleanup,
-    _SignalDelivery)
+    _SignalDelivery, _is_wsl_kernel_release)
 from codex_wsl_rpc.integration.transport import TransportError
 from codex_wsl_rpc.protocol import SuccessResponse
 
@@ -778,20 +778,63 @@ class ClientTests(unittest.TestCase):
                 self.assertNotIn("private", rendered); self.assertNotIn("secret", rendered)
 
     def test_platform_validation_requires_positive_proc_wsl_evidence_first(self):
-        accepted = ("4.4.0-19041-Microsoft", "5.15.90.1-mIcRoSoFt-standard-WSL2", "Linux WSL kernel")
-        for evidence in accepted:
-            with self.subTest(evidence=evidence):
-                client=self._client(_proc_reader=lambda path, text=evidence: text)
+        accepted = ("4.4.0-19041-Microsoft", "5.15.90.1-mIcRoSoFt-standard-WSL2")
+        for release in accepted:
+            with self.subTest(release=release):
+                client=self._client(_proc_reader=lambda path, text=release: text)
                 self.assertTrue(client._is_wsl())
-        rejected = (("linux", "6.8.0-generic"), ("linux", "container-linux"),
-                    ("win32", "Microsoft WSL2"), ("darwin", "Microsoft WSL2"))
-        for platform, evidence in rejected:
-            with self.subTest(platform=platform, evidence=evidence):
+        rejected = (("linux", "6.8.0-ubuntu-generic"), ("linux", "6.8.0-container"),
+                    ("win32", "5.15.90.1-microsoft-standard-WSL2"),
+                    ("darwin", "5.15.90.1-microsoft-standard-WSL2"))
+        for platform, release in rejected:
+            with self.subTest(platform=platform, release=release):
                 popen=mock.Mock()
-                client=self._client(_platform=platform, _proc_reader=lambda path, text=evidence: text,
+                client=self._client(_platform=platform, _proc_reader=lambda path, text=release: text,
                                     _popen=popen)
                 with self.assertRaises(UnsupportedPlatformError): client.list_one_page()
                 popen.assert_not_called()
+
+    def test_wsl_kernel_release_grammar_fails_closed(self):
+        accepted = ("5.15.90.1-microsoft-standard-WSL2",
+                    "5.15.90.1-microsoft-standard-WSL2\n",
+                    "4.19.104-microsoft-standard", "4.4.0-19041-Microsoft",
+                    "5.10.0-WSL2")
+        rejected = ("", "not-a-kernel-release", "6.8.0-ubuntu-generic",
+                    "linux-built-by-microsoft-example",
+                    "6.8.0-linux-built-by-microsoft-example",
+                    "6.8.0-wsl-build-metadata",
+                    "5.15.90.1-mİcrosoft-standard-WSL2",
+                    " 5.15.90.1-microsoft-standard-WSL2",
+                    "5.15.90.1-microsoft-standard-WSL2\n\n")
+        for release in accepted:
+            with self.subTest(release=release):
+                self.assertTrue(_is_wsl_kernel_release(release))
+        for release in rejected:
+            with self.subTest(release=release):
+                self.assertFalse(_is_wsl_kernel_release(release))
+
+    def test_proc_version_metadata_never_authorizes_wsl(self):
+        for metadata in ("Linux version 6.8.0 (builder@microsoft.example) #1 SMP",
+                         "Linux version 6.8.0 (compiler WSL toolchain) #1 SMP"):
+            with self.subTest(metadata=metadata):
+                reads = []
+                def proc_reader(path):
+                    reads.append(path)
+                    if path == Path("/proc/sys/kernel/osrelease"):
+                        return "6.8.0-ubuntu-generic"
+                    return metadata
+                self.assertFalse(self._client(_proc_reader=proc_reader)._is_wsl())
+                self.assertEqual(reads, [Path("/proc/sys/kernel/osrelease")])
+
+    def test_positive_wsl_detection_ignores_proc_version(self):
+        reads = []
+        def proc_reader(path):
+            reads.append(path)
+            if path == Path("/proc/sys/kernel/osrelease"):
+                return "5.15.90.1-microsoft-standard-WSL2"
+            raise AssertionError("/proc/version must not participate")
+        self.assertTrue(self._client(_proc_reader=proc_reader)._is_wsl())
+        self.assertEqual(reads, [Path("/proc/sys/kernel/osrelease")])
 
     def test_missing_proc_evidence_and_environment_alone_fail_before_target_access(self):
         missing=self.temp.name + "/does-not-exist"

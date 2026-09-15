@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from enum import Enum
 import os
 from pathlib import Path
+import re
 import secrets
 import signal
 import stat
@@ -129,6 +130,19 @@ def _platform_os_category(value: str) -> str:
     """Reduce server-controlled platform-OS text to reviewed tokens."""
     return value if value in {"linux", "windows"} else "unknown"
 
+_WSL_KERNEL_RELEASE = re.compile(
+    r"^[0-9]+(?:\.[0-9]+)+(?:-[0-9]+)?-"
+    r"(?:microsoft(?:-standard(?:-wsl2?)?)?|wsl2?)$",
+    re.ASCII | re.IGNORECASE,
+)
+
+def _is_wsl_kernel_release(release: str) -> bool:
+    """Accept only reviewed WSL forms in a single kernel release field."""
+    release = release.removesuffix("\n")
+    if not release or release != release.strip():
+        return False
+    return _WSL_KERNEL_RELEASE.fullmatch(release) is not None
+
 class ReadOnlyProjectListClient:
     def __init__(self, *, executable_path: Path, home_path: Path,
                  authorization: IntegrationAuthorization,
@@ -153,15 +167,11 @@ class ReadOnlyProjectListClient:
     def _is_wsl(self) -> bool:
         if not self._platform.startswith("linux"):
             return False
-        for path in (Path("/proc/sys/kernel/osrelease"), Path("/proc/version")):
-            try:
-                evidence = self._proc_reader(path)
-            except (OSError, UnicodeError):
-                continue
-            lowered = evidence.casefold()
-            if "microsoft" in lowered or "wsl" in lowered:
-                return True
-        return False
+        try:
+            release = self._proc_reader(Path("/proc/sys/kernel/osrelease"))
+        except (OSError, UnicodeError):
+            return False
+        return _is_wsl_kernel_release(release)
 
     def _validate(self) -> tuple[_ValidatedExecutable, _ValidatedHome]:
         if self._authorization is not IntegrationAuthorization.READ_ONLY_PROJECT_LIST:
