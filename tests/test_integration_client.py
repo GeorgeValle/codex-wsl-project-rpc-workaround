@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from codex_wsl_rpc.integration import IntegrationAuthorization, IntegrationError, ReadOnlyProjectListClient
+from codex_wsl_rpc.integration.client import CleanupError, PINNED_CODEX_SHA
 from codex_wsl_rpc.integration.transport import TransportError
 from codex_wsl_rpc.protocol import SuccessResponse
 
@@ -72,7 +73,16 @@ class ClientTests(unittest.TestCase):
         self.assertEqual([r.get("id") for r in fake.requests],[1,None,2]); self.assertTrue(fake.requests[0]["params"]["capabilities"]["experimentalApi"])
         self.assertEqual(fake.requests[2]["params"],{"cursor":None,"limit":25,"sortKey":"position","sortDirection":"asc"})
         safe=json.dumps(result.summary.to_safe_dict()); self.assertNotIn("secret",safe); self.assertNotIn("private-id",safe); self.assertNotIn("raw-cursor",safe)
+        self.assertNotIn(str(self.exe), safe); self.assertNotIn(str(self.home), safe)
         self.assertEqual(result.summary.returned_page_count,1); self.assertTrue(result.summary.has_more)
+        summary=result.summary.to_safe_dict()
+        self.assertEqual(summary["protocol_reference_sha"], PINNED_CODEX_SHA)
+        self.assertEqual(summary["target_provenance"], "operator_confirmed_openai_codex_unverified_by_repository")
+        self.assertEqual(summary["target_revision_mapping"], "NOT_ESTABLISHED")
+        self.assertEqual(summary["target_version"], "unobserved")
+        self.assertNotIn("tested_sha", summary); self.assertNotIn("version", summary)
+        self.assertIn("unverified", summary["target_provenance"])
+        self.assertIn("validates only its executable form", IntegrationAuthorization.READ_ONLY_PROJECT_LIST.value)
     def test_empty_page(self):
         result,_=self._run([]); self.assertEqual(result.summary.returned_page_count,0); self.assertFalse(result.summary.has_more)
 
@@ -106,6 +116,37 @@ class ClientTests(unittest.TestCase):
         fake.wait=wait
         client=ReadOnlyProjectListClient(executable_path=self.exe,home_path=self.home,authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,_popen=lambda *a,**k: fake)
         self.assertEqual(client.list_one_page().summary.cleanup_outcome, "terminated_owned_child")
+
+    def test_explicit_cleanup_failure_is_not_retried_or_masked(self):
+        fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":"/private","platformFamily":"unix","platformOs":"linux"}}, {"id":2,"result":{"data":[],"nextCursor":None}}])
+        client=ReadOnlyProjectListClient(executable_path=self.exe,home_path=self.home,authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,_popen=lambda *a,**k: fake)
+        primary=CleanupError("owned-child cleanup failed")
+        with mock.patch.object(client, "_cleanup", side_effect=primary) as cleanup:
+            with self.assertRaises(CleanupError) as caught: client.list_one_page()
+        self.assertIs(caught.exception, primary); cleanup.assert_called_once()
+
+    def test_early_failures_and_interrupts_receive_one_cleanup_attempt(self):
+        for failure in (TransportError("private"), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__):
+                process=CleanupProcess([0]); transport=mock.Mock()
+                transport.send.side_effect=failure
+                client=ReadOnlyProjectListClient(executable_path=self.exe,home_path=self.home,authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,_popen=lambda *a,**k: process)
+                with mock.patch("codex_wsl_rpc.integration.client._StreamTransport", return_value=transport), mock.patch.object(client, "_cleanup", return_value="graceful") as cleanup:
+                    with self.assertRaises(IntegrationError): client.list_one_page()
+                cleanup.assert_called_once_with(process, transport)
+
+    def test_method_not_found_remains_ambiguous_and_private(self):
+        fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":"/private","platformFamily":"unix","platformOs":"linux"}}, {"id":2,"error":{"code":-32601,"message":"secret method or store detail","data":{"path":"/private/project"}}}])
+        client=ReadOnlyProjectListClient(executable_path=self.exe,home_path=self.home,authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,_popen=lambda *a,**k: fake)
+        with self.assertRaises(IntegrationError) as caught: client.list_one_page()
+        self.assertEqual(str(caught.exception), "project/list unavailable or unsupported")
+        self.assertNotIn("store unavailable", str(caught.exception)); self.assertNotIn("secret", str(caught.exception)); self.assertNotIn("private", str(caught.exception))
+
+    def test_other_protocol_errors_remain_generic_and_private(self):
+        fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":"/private","platformFamily":"unix","platformOs":"linux"}}, {"id":2,"error":{"code":-32603,"message":"secret","data":{"project":"private"}}}])
+        client=ReadOnlyProjectListClient(executable_path=self.exe,home_path=self.home,authorization=IntegrationAuthorization.READ_ONLY_PROJECT_LIST,_popen=lambda *a,**k: fake)
+        with self.assertRaises(IntegrationError) as caught: client.list_one_page()
+        self.assertEqual(str(caught.exception), "project/list protocol error")
 
     def test_transport_failures_use_explicit_safe_phase(self):
         expected={1:"initialize", 2:"initialize", 3:"initialize", 4:"project/list", 5:"project/list"}

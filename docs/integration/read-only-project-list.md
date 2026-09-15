@@ -16,11 +16,14 @@ transport, state inspection, mutation, general RPC API, or arbitrary argv.
 
 ## Policy boundary and future authorization
 
-The operator must separately approve BIN-002, PATH-004, exact executable
-provenance, and one real `project/list` exercise at the reviewed commit. The
+The operator must separately approve BIN-002, PATH-004, the selected executable,
+and one real `project/list` exercise at the reviewed commit. The
 `IntegrationAuthorization` value and understanding flag are auditable
-application guardrails, not an OS security boundary. Imports and construction
-are inert; only `list_one_page()` starts a process.
+application guardrails, not cryptographic identity or provenance proof and not
+an OS security boundary. The operator asserts that the path is the intended
+already-installed OpenAI Codex executable; repository code validates only its
+executable form. Imports and construction are inert; only `list_one_page()`
+starts a process.
 
 The executable and home are explicit absolute WSL paths. Code never searches
 `PATH`, scans an installation, resolves a symlink, downloads, installs, or
@@ -72,13 +75,23 @@ Behavior is modeled at public OpenAI Codex revision
 - Experimental `project/list` registration, dispatch and errors: [`protocol/common.rs`](https://github.com/openai/codex/blob/7efa9d96fb34c3cafe108a3c870bfc33e5635772/codex-rs/app-server-protocol/src/protocol/common.rs), [`request_processors/projects.rs`, `project_list`](https://github.com/openai/codex/blob/7efa9d96fb34c3cafe108a3c870bfc33e5635772/codex-rs/app-server/src/request_processors/projects.rs), and [`error_code.rs`](https://github.com/openai/codex/blob/7efa9d96fb34c3cafe108a3c870bfc33e5635772/codex-rs/app-server-protocol/src/error_code.rs).
 - Allowed notification definitions: [`protocol/common.rs`, server notification definitions](https://github.com/openai/codex/blob/7efa9d96fb34c3cafe108a3c870bfc33e5635772/codex-rs/app-server-protocol/src/protocol/common.rs). Payloads are intentionally discarded.
 
-Installed-build compatibility and Desktop-store equivalence remain
-`NOT_ESTABLISHED`.
+The protocol reference is pinned to that source revision. The selected product
+identity is operator-confirmed but unverified by repository code; its version is
+unobserved, and installed binary-to-pinned-source mapping, installed-build
+compatibility, and Desktop-store equivalence remain `NOT_ESTABLISHED`.
+
+An error code of `-32601` is reported only as `project/list unavailable or
+unsupported`. This intentionally privacy-safe category can mean that the method
+is not registered, the feature or Project capability is unavailable, the store
+is unavailable in the selected runtime context, or another method-not-found
+style condition. Raw server error messages and data are not used or exposed.
 
 ## Privacy and evidence
 
 Decoded Projects exist transiently in memory and are not persisted or logged.
-Output allowlists the pinned SHA, UTC timestamp, provenance/version category,
+Output allowlists the protocol-reference SHA, UTC timestamp, operator-confirmed
+but code-unverified target provenance, `NOT_ESTABLISHED` target-revision mapping,
+unobserved target version,
 platform strings, lifecycle booleans, sanitized Codex-home category, page
 count, `has_more`, root representation categories, cleanup outcome, and
 explicit negative mutation/state-inspection/Desktop-comparison facts. It never
@@ -94,8 +107,10 @@ python3 tools/run_read_only_project_list.py \
   --home /home/<USER>
 ```
 
-Safe evidence must record reviewed commit/SHA, UTC time, operator-confirmed
-provenance category, safe runner JSON, exact `project/list` authorization, and
+Safe evidence must record the protocol-reference SHA, UTC time,
+operator-confirmed/code-unverified provenance category, unobserved version,
+`NOT_ESTABLISHED` installed-binary-to-source mapping, safe runner JSON, exact
+`project/list` authorization, and
 whether product/network/helper effects were observed—never raw Projects or
 paths.
 
@@ -107,8 +122,8 @@ paths.
 - **BIN-002 helper behavior:** pinned-source review has not established the
   complete helper/descendant process behavior of normal startup. No helper
   execution is authorized by Phase A.
-- Operator confirmation of exact installed executable provenance and mapping
-  to the pinned SHA remains required.
+- Independent proof of installed executable provenance and mapping to the pinned
+  SHA remains absent; operator confirmation is not such proof.
 - Product startup filesystem effects, shared state with Desktop, returned-page
   correspondence, and Desktop visibility remain `NOT_ESTABLISHED`.
 

@@ -26,7 +26,10 @@ TERMINATE_TIMEOUT = 2.0
 KILL_TIMEOUT = 2.0
 
 class IntegrationAuthorization(Enum):
-    READ_ONLY_PROJECT_LIST = "I understand this starts the exact selected Codex app-server for one read-only project/list page"
+    READ_ONLY_PROJECT_LIST = (
+        "I confirm I selected the intended already-installed OpenAI Codex executable; "
+        "repository code validates only its executable form before one read-only project/list page"
+    )
 
 class IntegrationError(RuntimeError):
     """Safe base error; messages never include product data or paths."""
@@ -43,10 +46,11 @@ class OperatorCancelledError(IntegrationError): pass
 
 @dataclass(frozen=True, slots=True)
 class ProjectListRunSummary:
-    tested_sha: str
+    protocol_reference_sha: str
     observed_at_utc: str
     target_provenance: str
-    version: str
+    target_revision_mapping: str
+    target_version: str
     platform_family: str
     platform_os: str
     initialize_attempted: bool
@@ -145,17 +149,19 @@ class ReadOnlyProjectListClient:
             phase = "project_list_wait"
             response = transport.receive_response(2, list_deadline)
             if isinstance(response, ErrorResponse):
-                category = "project store unavailable" if response.error.code == -32601 else "project/list protocol error"
+                category = "project/list unavailable or unsupported" if response.error.code == -32601 else "project/list protocol error"
                 raise ProjectListError(category)
             if not isinstance(response, SuccessResponse): raise ProjectListError("project/list protocol error")
             try: page = ProjectListResponse.from_wire(response.result)
             except ValueError as error: raise ProjectListError("project/list protocol error") from error
             categories = tuple(sorted({_root_category(root.path) for project in page.data for root in project.roots}))
             phase = "cleanup"
-            cleanup = self._cleanup(process, transport)
+            owned_process, owned_transport = process, transport
             process = transport = None
+            cleanup = self._cleanup(owned_process, owned_transport)
             summary = ProjectListRunSummary(PINNED_CODEX_SHA, datetime.now(timezone.utc).isoformat(),
-                "operator_confirmed_pinned_revision", "unobserved", initialized.platform_family,
+                "operator_confirmed_openai_codex_unverified_by_repository", "NOT_ESTABLISHED",
+                "unobserved", initialized.platform_family,
                 initialized.platform_os, True, True, True, True, True,
                 "absolute_path_reported_not_exposed", len(page.data), page.next_cursor is not None,
                 categories, cleanup)
