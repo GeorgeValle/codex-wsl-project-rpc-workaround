@@ -382,6 +382,7 @@ class ReadOnlyProjectListClient:
             outcome, state, deadline = "graceful", "transport_close", None
             stage_timeout = CLOSE_TIMEOUT
             reaped = False
+            stdout_eof = getattr(transport, "_supports_terminal_drain", False) is not True
 
         # SIGINT stays blocked across every state transition.  The local catch
         # remains only for deterministic injected exceptions in tests; real
@@ -404,7 +405,17 @@ class ReadOnlyProjectListClient:
                     elif state == "wait":
                         remaining = deadline - self._clock()
                         if remaining <= 0:
-                            reaped = process.returncode is not None
+                            if getattr(transport, "_supports_terminal_drain", False) is True:
+                                child_reaped, stdout_eof = transport.drain_terminal(
+                                    process, deadline
+                                )
+                                reaped = child_reaped and stdout_eof
+                                if child_reaped and not stdout_eof:
+                                    failures.append("stdout_eof")
+                                    state = "finalize"
+                                    continue
+                            else:
+                                reaped = process.returncode is not None
                         else:
                             try:
                                 if getattr(transport, "_supports_terminal_drain", False) is True:
@@ -425,7 +436,8 @@ class ReadOnlyProjectListClient:
                                 reaped = False
                             except Exception:
                                 failures.append("wait")
-                                reaped = process.returncode is not None
+                                child_reaped = process.returncode is not None
+                                reaped = child_reaped and stdout_eof
                         if reaped:
                             state = "finalize"
                         elif (owned_child.terminate_state is not _SignalDelivery.DELIVERED and
@@ -462,7 +474,7 @@ class ReadOnlyProjectListClient:
                     elif state == "kill_deadline":
                         stage_timeout, state = KILL_TIMEOUT, "deadline"
                     elif state == "finalize":
-                        if reaped:
+                        if reaped and stdout_eof:
                             owned_child.completed = True
                             owned_child.process = None
                             owned_child.transport = None

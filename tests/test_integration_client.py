@@ -89,6 +89,20 @@ class ScriptedTransport:
         return SuccessResponse(request_id, {"data": [], "nextCursor": None})
     def close(self): pass
 
+class TerminalCleanupTransport:
+    _supports_terminal_drain = True
+
+    def __init__(self, states):
+        self.states = iter(states)
+        self.terminal_error = None
+        self.closed = False
+
+    def drain_terminal(self, process, deadline):
+        return next(self.states)
+
+    def close(self):
+        self.closed = True
+
 def project(name="secret", roots=None):
     return {"id":"private-id","name":name,"roots":roots or [],"metadata":{"secret":"value"},"position":1,"createdAt":2,"updatedAt":3,"recencyAt":None}
 
@@ -360,6 +374,36 @@ class ClientTests(unittest.TestCase):
                 self.assertTrue(state.completed)
                 self.assertEqual(process.terminate.call_count, terminates)
                 self.assertEqual(process.kill.call_count, kills)
+
+    def test_cleanup_requires_reap_and_stdout_eof_at_expired_deadline(self):
+        process = CleanupProcess([])
+        process.returncode = 0
+        transport = TerminalCleanupTransport([(True, False)])
+        state = _OwnedChildCleanup(process, transport)
+
+        with self.assertRaisesRegex(CleanupError, "owned-child cleanup failed"):
+            self._client(_clock=ScriptedClock([0.0, 0.0, 7.0]))._cleanup(state)
+
+        self.assertFalse(state.completed)
+        self.assertIs(state.process, process)
+        self.assertTrue(transport.closed)
+        process.terminate.assert_not_called()
+        process.kill.assert_not_called()
+
+    def test_cleanup_completes_only_after_reap_and_stdout_eof(self):
+        process = CleanupProcess([])
+        process.returncode = 0
+        transport = TerminalCleanupTransport([(True, True)])
+        state = _OwnedChildCleanup(process, transport)
+
+        self.assertEqual(
+            self._client(_clock=ScriptedClock([0.0, 0.0, 7.0]))._cleanup(state),
+            "graceful",
+        )
+
+        self.assertTrue(state.completed)
+        self.assertIsNone(state.process)
+        self.assertTrue(transport.closed)
 
     def test_cleanup_retries_interrupted_mask_acquisition_before_starting(self):
         for interruptions in (1, 3):
