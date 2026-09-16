@@ -550,7 +550,7 @@ class ReadOnlyProjectListClient:
                                 else:
                                     failures.append("child_exit")
                             elif owned_child.terminate_state is _SignalDelivery.DELIVERED:
-                                if process.returncode == -signal.SIGTERM:
+                                if process.returncode in (0, -signal.SIGTERM):
                                     outcome = "terminated_owned_child"
                                 else:
                                     failures.append("child_exit")

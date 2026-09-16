@@ -647,6 +647,8 @@ class ClientTests(unittest.TestCase):
         cases = (
             ([subprocess.TimeoutExpired("fake", 1), -15],
              "terminated_owned_child", 1, 0),
+            ([subprocess.TimeoutExpired("fake", 1), 0],
+             "terminated_owned_child", 1, 0),
             ([subprocess.TimeoutExpired("fake", 1),
               subprocess.TimeoutExpired("fake", 1), -9],
              "killed_owned_child", 1, 1),
@@ -663,6 +665,7 @@ class ClientTests(unittest.TestCase):
         cases = (
             ([subprocess.TimeoutExpired("fake", 1), 1], 1, 0),
             ([subprocess.TimeoutExpired("fake", 1), 23], 1, 0),
+            ([subprocess.TimeoutExpired("fake", 1), -signal.SIGKILL], 1, 0),
             ([subprocess.TimeoutExpired("fake", 1),
               subprocess.TimeoutExpired("fake", 1), 1], 1, 1),
         )
