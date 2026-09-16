@@ -510,6 +510,14 @@ class ReadOnlyProjectListClient:
                         stage_timeout, state = KILL_TIMEOUT, "deadline"
                     elif state == "finalize":
                         if reaped and stdout_eof:
+                            if owned_child.kill_state is _SignalDelivery.DELIVERED:
+                                outcome = "killed_owned_child"
+                            elif owned_child.terminate_state is _SignalDelivery.DELIVERED:
+                                outcome = "terminated_owned_child"
+                            elif process.returncode != 0:
+                                failures.append("child_exit")
+                            else:
+                                outcome = "graceful"
                             owned_child.completed = True
                             owned_child.process = None
                             owned_child.transport = None

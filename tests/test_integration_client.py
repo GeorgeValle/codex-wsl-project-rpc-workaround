@@ -517,6 +517,67 @@ class ClientTests(unittest.TestCase):
         self.assertIsNone(state.process)
         self.assertTrue(transport.closed)
 
+    def test_graceful_cleanup_requires_zero_exit_status(self):
+        for returncode in (1, 23, -9):
+            with self.subTest(returncode=returncode):
+                process = CleanupProcess([])
+                process.returncode = returncode
+                transport = TerminalCleanupTransport([(True, True)])
+                state = _OwnedChildCleanup(process, transport)
+
+                with self.assertRaisesRegex(CleanupError, "owned-child cleanup failed"):
+                    self._client(
+                        _clock=ScriptedClock([0.0, 0.0, 7.0])
+                    )._cleanup(state)
+
+                self.assertTrue(state.completed)
+                process.terminate.assert_not_called()
+                process.kill.assert_not_called()
+
+    def test_forced_cleanup_allows_signal_exit_status(self):
+        cases = (
+            ([subprocess.TimeoutExpired("fake", 1), -15],
+             "terminated_owned_child", 1, 0),
+            ([subprocess.TimeoutExpired("fake", 1),
+              subprocess.TimeoutExpired("fake", 1), -9],
+             "killed_owned_child", 1, 1),
+        )
+        for waits, expected, terminates, kills in cases:
+            with self.subTest(expected=expected):
+                process = CleanupProcess(waits)
+                state = _OwnedChildCleanup(process, None)
+                self.assertEqual(self._client()._cleanup(state), expected)
+                self.assertEqual(process.terminate.call_count, terminates)
+                self.assertEqual(process.kill.call_count, kills)
+
+    def test_nonzero_graceful_exit_cannot_emit_safe_success(self):
+        fake = FakeProcess([
+            {"id": 1, "result": {"userAgent": "private", "codexHome": "/private",
+             "platformFamily": "unix", "platformOs": "linux"}},
+            {"id": 2, "result": {"data": [], "nextCursor": None}},
+        ])
+        original_wait = fake.wait
+        def unsuccessful_wait(timeout):
+            original_wait(timeout)
+            fake.returncode = 1
+            return 1
+        fake.wait = unsuccessful_wait
+        def unsuccessful_poll():
+            if fake.thread.is_alive():
+                return None
+            fake.returncode = 1
+            return 1
+        fake.poll = unsuccessful_poll
+
+        with self.assertRaises(CleanupError) as caught:
+            self._client(_popen=lambda *a, **k: fake).list_one_page()
+
+        rendered = str(caught.exception)
+        self.assertEqual(rendered, "owned-child cleanup failed")
+        self.assertNotIn("secret stderr", rendered)
+        self.assertNotIn("/private/path", rendered)
+        self.assertNotIn("project_list_succeeded", rendered)
+
     def test_cleanup_retries_interrupted_mask_acquisition_before_starting(self):
         for interruptions in (1, 3):
             with self.subTest(interruptions=interruptions):
