@@ -126,7 +126,7 @@ Block 3 remains separately human-gated.
 
 This real-product observation remains historical evidence for the exact tested
 repository HEAD `f9f61486339029f3743db02b5ba03c4d06d627fe`. The later corrective
-runtime/test commit `aa91f1fbdede59b5cdafdd49b0990891b602a0c3`
+runtime/test commit `cc216bf6131e8d093eccde1df37ddcb9733a8316`
 closes the later lifecycle, descriptor-release, transport-construction, and
 transport error-boundary gaps and has received deterministic offline validation
 only. The commit is reachable in the current branch history. It has **not** been
