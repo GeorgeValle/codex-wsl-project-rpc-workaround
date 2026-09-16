@@ -545,9 +545,20 @@ class ReadOnlyProjectListClient:
                     elif state == "finalize":
                         if reaped and stdout_eof:
                             if owned_child.kill_state is _SignalDelivery.DELIVERED:
-                                outcome = "killed_owned_child"
+                                if process.returncode == -signal.SIGKILL:
+                                    outcome = "killed_owned_child"
+                                else:
+                                    failures.append("child_exit")
                             elif owned_child.terminate_state is _SignalDelivery.DELIVERED:
-                                outcome = "terminated_owned_child"
+                                if process.returncode == -signal.SIGTERM:
+                                    outcome = "terminated_owned_child"
+                                else:
+                                    failures.append("child_exit")
+                            elif (owned_child.kill_state is
+                                  _SignalDelivery.DELIVERY_UNCERTAIN or
+                                  owned_child.terminate_state is
+                                  _SignalDelivery.DELIVERY_UNCERTAIN):
+                                failures.append("signal_delivery")
                             elif process.returncode != 0:
                                 failures.append("child_exit")
                             else:

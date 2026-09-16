@@ -13,7 +13,7 @@ PR #9 is historical delivery evidence, not a stable roadmap identity.
 ## Tested HEAD
 
 The implementation and test HEAD validated by both canonical runs was
-`a9489bbd896fa75578c9ecc919ba5e39b38ad612`. This reachable runtime/test commit
+`aa91f1fbdede59b5cdafdd49b0990891b602a0c3`. This reachable runtime/test commit
 is the parent of the documentation-only evidence commit and remains in branch
 history.
 
@@ -36,7 +36,7 @@ No personal paths, credentials, or secret values were recorded.
 
 ## Test inventory
 
-Discovery found **239 test cases**. Counts below are discovery counts, not an
+Discovery found **242 test cases**. Counts below are discovery counts, not an
 aspirational target.
 
 | Area | Test file(s) | Test count | Main invariants |
@@ -51,10 +51,10 @@ aspirational target.
 | Mock client | `tests/test_mock_client.py` | 4 | Typed lifecycle, request IDs, server errors, exact response correlation, no retry |
 | Mock safety | `tests/test_mock_safety.py` | 1 | Static denial of process, network, state, discovery, and mutation capabilities |
 | Integration transport with fakes | `tests/test_integration_transport.py` | 35 | Partial I/O, fragmented UTF-8, framing, unpredictable-ID correlation, notifications, limits, deadlines, trailing output, terminal EOF, normalized OS failures and exception-safe construction |
-| Integration orchestration with fakes | `tests/test_integration_client.py` | 61 | Authorization, WSL gate, executable/HOME identity, launch ownership, cancellation, unified finalization, cleanup, strict responses, safe evidence |
+| Integration orchestration with fakes | `tests/test_integration_client.py` | 64 | Authorization, WSL gate, executable/HOME identity, launch ownership, cancellation, unified finalization, signal-consistent cleanup, strict responses, safe evidence |
 | Integration/import safety | `tests/test_integration_safety.py` | 7 | Inert imports/runner, lazy signal API lookup, explicit gate, safe categories, no real execution or mutation surface |
 | Packaging/import acceptance | `tests/test_validate_packaging.py` | 27 | Controlled local artifact, inert installed imports, installed origins, mock/integration inclusion, no network/state/process side effects |
-| **Total** | **13 focused test files** | **239** | **Complete deterministic offline suite** |
+| **Total** | **13 focused test files** | **242** | **Complete deterministic offline suite** |
 
 ## Regression coverage
 
@@ -84,9 +84,9 @@ SIGINT masking and bounded acquisition, retained exact-child ownership,
 truthful terminate/kill delivery state, absolute cleanup deadlines, bounded
 escalation, child reaping, stdout EOF, descriptor-close failure behavior—including terminal selector close failures—and
 cleanup-error precedence. Graceful cleanup additionally requires a zero child
-exit status; spontaneous positive or signal-style nonzero statuses fail closed,
-while nonzero statuses after truthfully delivered terminate/kill escalation
-retain their forced-cleanup outcomes. Validation descriptors use take-before-close
+exit status. Forced outcomes require both confirmed delivery and the matching
+POSIX signal status (`-SIGTERM` or `-SIGKILL`); ordinary positive statuses and
+delivery-uncertain statuses fail closed. Validation descriptors use take-before-close
 release, and descriptor-release failure cannot bypass independent owned-child
 cleanup.
 
@@ -132,7 +132,7 @@ Every discovered focused test file was executed independently.
 | `python3 tests/test_mock_client.py` | PASS — 4 tests |
 | `python3 tests/test_mock_safety.py` | PASS — 1 test |
 | `python3 tests/test_integration_transport.py` | PASS — 35 tests |
-| `python3 tests/test_integration_client.py` | PASS — 61 tests |
+| `python3 tests/test_integration_client.py` | PASS — 64 tests |
 | `python3 tests/test_integration_safety.py` | PASS — 7 tests |
 | `python3 tests/test_validate_packaging.py` | PASS — 27 tests |
 
@@ -143,8 +143,8 @@ skipped, and the count and outcome were equivalent.
 
 | Run | Tests | Passed | Failed | Errors | Skipped | Reported time |
 |---|---:|---:|---:|---:|---:|---:|
-| 1 | 239 | 239 | 0 | 0 | 0 | 12.741s |
-| 2 | 239 | 239 | 0 | 0 | 0 | 10.680s |
+| 1 | 242 | 242 | 0 | 0 | 0 | 16.425s |
+| 2 | 242 | 242 | 0 | 0 | 0 | 20.505s |
 
 ## Packaging and static checks
 

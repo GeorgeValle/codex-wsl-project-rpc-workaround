@@ -531,8 +531,11 @@ class ClientTests(unittest.TestCase):
     def test_cleanup_tracks_graceful_terminate_and_kill(self):
         cases=(
             ([0], "graceful", 0, 0),
-            ([subprocess.TimeoutExpired("fake", 1), 0], "terminated_owned_child", 1, 0),
-            ([subprocess.TimeoutExpired("fake", 1), subprocess.TimeoutExpired("fake", 1), 0], "killed_owned_child", 1, 1),
+            ([subprocess.TimeoutExpired("fake", 1), -signal.SIGTERM],
+             "terminated_owned_child", 1, 0),
+            ([subprocess.TimeoutExpired("fake", 1),
+              subprocess.TimeoutExpired("fake", 1), -signal.SIGKILL],
+             "killed_owned_child", 1, 1),
         )
         for waits, expected, terminates, kills in cases:
             with self.subTest(expected=expected):
@@ -656,6 +659,44 @@ class ClientTests(unittest.TestCase):
                 self.assertEqual(process.terminate.call_count, terminates)
                 self.assertEqual(process.kill.call_count, kills)
 
+    def test_forced_cleanup_rejects_incompatible_exit_status(self):
+        cases = (
+            ([subprocess.TimeoutExpired("fake", 1), 1], 1, 0),
+            ([subprocess.TimeoutExpired("fake", 1), 23], 1, 0),
+            ([subprocess.TimeoutExpired("fake", 1),
+              subprocess.TimeoutExpired("fake", 1), 1], 1, 1),
+        )
+        for waits, terminates, kills in cases:
+            with self.subTest(waits=waits):
+                process = CleanupProcess(waits)
+                state = _OwnedChildCleanup(process, None)
+
+                with self.assertRaisesRegex(CleanupError,
+                                            "owned-child cleanup failed"):
+                    self._client()._cleanup(state)
+
+                self.assertTrue(state.completed)
+                self.assertEqual(process.terminate.call_count, terminates)
+                self.assertEqual(process.kill.call_count, kills)
+
+    def test_uncertain_signal_delivery_is_not_upgraded_by_final_status(self):
+        process = CleanupProcess([])
+        process.returncode = -signal.SIGTERM
+        state = _OwnedChildCleanup(
+            process,
+            TerminalCleanupTransport([(True, True)]),
+            terminate_state=_SignalDelivery.DELIVERY_UNCERTAIN,
+            terminate_attempts=2,
+            kill_state=_SignalDelivery.DELIVERY_UNCERTAIN,
+            kill_attempts=2,
+        )
+
+        with self.assertRaisesRegex(CleanupError, "owned-child cleanup failed"):
+            self._client(_clock=ScriptedClock([0.0, 0.0, 7.0]))._cleanup(state)
+
+        self.assertIs(state.terminate_state, _SignalDelivery.DELIVERY_UNCERTAIN)
+        self.assertIs(state.kill_state, _SignalDelivery.DELIVERY_UNCERTAIN)
+
     def test_nonzero_graceful_exit_cannot_emit_safe_success(self):
         fake = FakeProcess([
             {"id": 1, "result": {"userAgent": "private", "codexHome": "/private",
@@ -763,7 +804,7 @@ class ClientTests(unittest.TestCase):
         process = CleanupProcess([
             subprocess.TimeoutExpired("fake", 1),
             subprocess.TimeoutExpired("fake", 1),
-            0,
+            -signal.SIGKILL,
         ])
         process.stdin.close.side_effect = lambda: self.assertTrue(blocked)
         process.terminate.side_effect = lambda: self.assertTrue(blocked)
@@ -839,9 +880,37 @@ class ClientTests(unittest.TestCase):
         def terminate():
             nonlocal terminated
             terminated = True
+            fake.returncode = -signal.SIGTERM
         fake.terminate = mock.Mock(side_effect=terminate)
         client=self._client(_popen=lambda *a,**k: fake)
         self.assertEqual(client.list_one_page().summary.cleanup_outcome, "terminated_owned_child")
+
+    def test_incompatible_forced_exit_cannot_emit_safe_success(self):
+        fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":"/private","platformFamily":"unix","platformOs":"linux"}}, {"id":2,"result":{"data":[],"nextCursor":None}}])
+        original_wait = fake.wait
+        calls = 0
+        def wait(timeout):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise subprocess.TimeoutExpired("fake", timeout)
+            original_wait(timeout)
+            fake.returncode = 1
+            return 1
+        fake.wait = wait
+        fake.returncode = None
+        fake.poll = lambda: fake.returncode
+        fake.terminate = mock.Mock()
+
+        with self.assertRaises(CleanupError) as caught:
+            self._client(_popen=lambda *a, **k: fake).list_one_page()
+
+        rendered = json.dumps({"status": "failed",
+                               "category": caught.exception.category})
+        self.assertEqual(caught.exception.category, "cleanup_failure")
+        self.assertNotIn("project_list_succeeded", rendered)
+        self.assertNotIn("/private", rendered)
+        self.assertNotIn("secret", rendered)
 
     def test_explicit_cleanup_failure_is_not_retried_or_masked(self):
         fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":"/private","platformFamily":"unix","platformOs":"linux"}}, {"id":2,"result":{"data":[],"nextCursor":None}}])
@@ -870,8 +939,11 @@ class ClientTests(unittest.TestCase):
     def test_interrupted_cleanup_retains_ownership_and_never_repeats_signals(self):
         cases = (
             ([KeyboardInterrupt(), 0], 0, 0),
-            ([subprocess.TimeoutExpired("fake", 1), KeyboardInterrupt(), 0], 1, 0),
-            ([subprocess.TimeoutExpired("fake", 1), subprocess.TimeoutExpired("fake", 1), KeyboardInterrupt(), 0], 1, 1),
+            ([subprocess.TimeoutExpired("fake", 1), KeyboardInterrupt(),
+              -signal.SIGTERM], 1, 0),
+            ([subprocess.TimeoutExpired("fake", 1),
+              subprocess.TimeoutExpired("fake", 1), KeyboardInterrupt(),
+              -signal.SIGKILL], 1, 1),
         )
         for waits, terminates, kills in cases:
             with self.subTest(terminates=terminates, kills=kills):
@@ -957,7 +1029,7 @@ class ClientTests(unittest.TestCase):
         process = CleanupProcess([
             subprocess.TimeoutExpired("fake", 1),
             subprocess.TimeoutExpired("fake", 1),
-            0,
+            -signal.SIGKILL,
         ])
         state = _OwnedChildCleanup(process, None)
         with self.assertRaises(OperatorCancelledError):
@@ -971,12 +1043,12 @@ class ClientTests(unittest.TestCase):
         process = CleanupProcess([
             subprocess.TimeoutExpired("fake", 1),
             subprocess.TimeoutExpired("fake", 1),
-            0,
+            -signal.SIGTERM,
         ])
         process.terminate.side_effect = KeyboardInterrupt()
         process.kill.side_effect = KeyboardInterrupt()
         state = _OwnedChildCleanup(process, None)
-        with self.assertRaises(OperatorCancelledError):
+        with self.assertRaises(CleanupError):
             self._client()._cleanup(state)
         self.assertTrue(state.completed)
         self.assertEqual(process.terminate.call_count, 2)
@@ -989,7 +1061,7 @@ class ClientTests(unittest.TestCase):
             subprocess.TimeoutExpired("fake", 1),
             subprocess.TimeoutExpired("fake", 1),
             subprocess.TimeoutExpired("fake", 1),
-            0,
+            -signal.SIGKILL,
         ])
         process.kill.side_effect = (KeyboardInterrupt(), None)
         state = _OwnedChildCleanup(process, None)
