@@ -50,10 +50,12 @@ class ProjectTests(unittest.TestCase):
         self.assertIsNone(model.sort_key); self.assertEqual(model.sort_direction,SortDirection.ASC)
 
     def test_list_response(self):
-        model=ProjectListResponse.from_wire({"data":[project_wire()]})
+        model=ProjectListResponse.from_wire({"data":[project_wire()],"nextCursor":None})
         self.assertEqual(model.to_wire()["nextCursor"],None)
         self.assertEqual(ProjectListResponse.from_wire({"data":[],"nextCursor":"next"}).next_cursor,"next")
-        for wire in ({}, {"data":None}, {"data":[{"id":"bad"}]}):
+        for wire in ({}, {"data":[]}, {"data":None,"nextCursor":None},
+                     {"data":[{"id":"bad"}],"nextCursor":None},
+                     {"data":[],"nextCursor":1}):
             with self.assertRaises(ProtocolDecodeError): ProjectListResponse.from_wire(wire)
 
 if __name__ == "__main__": unittest.main()

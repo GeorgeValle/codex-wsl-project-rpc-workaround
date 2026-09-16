@@ -9,7 +9,7 @@ wire contract exists.
 | [2.1](subdivision-2.1-protocol-research.md) | Public Codex app-server protocol research | IMPLEMENTED |
 | 2.2 | Mock protocol transport and schemas | IMPLEMENTED — Deliveries 1–3 and the incident-evidence documentation follow-up are implemented |
 | Governance prerequisite for 2.3 | Bounded product-under-test execution policy | IMPLEMENTED — policy clarification only; no real execution or RPC |
-| 2.3 | Read-only real `project/list` integration | FUTURE — requires review and resolved integration gates |
+| 2.3 | Read-only real `project/list` integration | IN PROGRESS — Cloud/offline implementation COMPLETE; local WSL validation PENDING; capability MOCK_ONLY; mutation authorization NONE; GATE-002 UNSATISFIED |
 
 Capability progression remains governed by `GATE-001` through `GATE-003` in
 the [requirements](../../../projects-requirements.md). Completion of one
@@ -40,7 +40,9 @@ real product process, and does not change the `MOCK_ONLY` capability or `NONE`
 mutation authorization. `GATE-002` remains `UNSATISFIED`; the policy
 clarification alone does not establish `READ_ONLY` capability.
 
-Subdivision 2.3 remains `FUTURE` and separately human-gated for implementation
+Subdivision 2.3 is `IN PROGRESS`: Cloud/offline implementation is `COMPLETE`
+and local WSL validation is `PENDING`. Capability remains `MOCK_ONLY`, mutation
+authorization remains `NONE`, and `GATE-002` remains `UNSATISFIED`. It is separately human-gated for real execution
 and real validation of read-only `project/list`. A future review may consider
 an explicit operator-selected WSL Codex/app-server executable, stdio only,
 `initialize`, the `initialized` notification, `project/list`, and real local
