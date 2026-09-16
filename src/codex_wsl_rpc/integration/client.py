@@ -105,13 +105,19 @@ class _OwnedChildCleanup:
     interrupted: bool = False
     protection_failed: bool = False
 
-@dataclass(frozen=True, slots=True)
-class _ValidatedExecutable:
-    fd: int
+@dataclass(slots=True)
+class _ValidatedTarget:
+    """Caller-owned validation resources, created before validation begins."""
+    executable_fd: int | None = None
+    home_fd: int | None = None
 
-@dataclass(frozen=True, slots=True)
-class _ValidatedHome:
-    fd: int
+    def close(self) -> None:
+        if self.home_fd is not None:
+            os.close(self.home_fd)
+            self.home_fd = None
+        if self.executable_fd is not None:
+            os.close(self.executable_fd)
+            self.executable_fd = None
 
 def _path_category(path: str) -> str:
     if not path: return "empty"
@@ -173,10 +179,8 @@ class ReadOnlyProjectListClient:
             return False
         return _is_wsl_kernel_release(release)
 
-    def _validate(self) -> tuple[_ValidatedExecutable, _ValidatedHome]:
-        fd: int | None = None
-        home: _ValidatedHome | None = None
-        validated = False
+    def _validate(self, target: _ValidatedTarget) -> None:
+        completed = False
         try:
             if self._authorization is not IntegrationAuthorization.READ_ONLY_PROJECT_LIST:
                 raise AuthorizationError("explicit read-only authorization is missing")
@@ -196,8 +200,8 @@ class ReadOnlyProjectListClient:
                     "target must be a reviewed executable regular file"
                 )
             try:
-                fd = os.open(path, flags)
-                opened_status = os.fstat(fd)
+                target.executable_fd = os.open(path, flags)
+                opened_status = os.fstat(target.executable_fd)
             except OSError as error:
                 raise InvalidTargetError("target could not be validated") from error
             if (stat.S_ISLNK(path_status.st_mode) or
@@ -208,47 +212,36 @@ class ReadOnlyProjectListClient:
                     (opened_status.st_dev, opened_status.st_ino)):
                 raise InvalidTargetError("target identity changed during validation")
             try:
-                header = os.pread(fd, 4, 0)
+                header = os.pread(target.executable_fd, 4, 0)
             except OSError as error:
                 raise InvalidTargetError("target could not be validated") from error
             if header != b"\x7fELF":
                 raise UnsupportedTargetError("target must be the reviewed concrete native executable")
-            home = self._validate_home()
-            validated = True
-            return _ValidatedExecutable(fd), home
+            self._validate_home(target)
+            completed = True
         finally:
-            if not validated:
-                if home is not None:
-                    os.close(home.fd)
-                if fd is not None:
-                    os.close(fd)
+            if not completed:
+                target.close()
 
-    def _validate_home(self) -> _ValidatedHome:
+    def _validate_home(self, target: _ValidatedTarget) -> None:
         if not self._home_path.is_absolute():
             raise InvalidTargetError("home must be an existing absolute directory")
         flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
                  getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0))
-        fd: int | None = None
-        validated = False
         try:
             path_status = self._lstat(self._home_path)
             if stat.S_ISLNK(path_status.st_mode) or not stat.S_ISDIR(path_status.st_mode):
                 raise InvalidTargetError("home must be an existing absolute directory")
-            fd = os.open(self._home_path, flags)
-            opened_status = os.fstat(fd)
+            target.home_fd = os.open(self._home_path, flags)
+            opened_status = os.fstat(target.home_fd)
             if (not stat.S_ISDIR(opened_status.st_mode) or
                     (path_status.st_dev, path_status.st_ino) !=
                     (opened_status.st_dev, opened_status.st_ino)):
                 raise InvalidTargetError("home identity changed during validation")
-            validated = True
-            return _ValidatedHome(fd)
         except Exception as error:
             if isinstance(error, InvalidTargetError):
                 raise
             raise InvalidTargetError("home could not be validated") from error
-        finally:
-            if fd is not None and not validated:
-                os.close(fd)
 
     def _next_request_id(self, used: set[str]) -> str:
         request_id = self._id_generator()
@@ -267,24 +260,26 @@ class ReadOnlyProjectListClient:
         return sigmask
 
     def list_one_page(self) -> ProjectListRunResult:
-        executable = home = None
+        target = _ValidatedTarget()
         process = transport = None
         owned_child = None
         cleanup = "not_started"
         phase = "startup"
         request_ids: set[str] = set()
         try:
-            executable, home = self._validate()
+            self._validate(target)
+            assert target.executable_fd is not None and target.home_fd is not None
             sigmask = self._resolve_sigmask()
             try:
                 previous_mask = sigmask(signal.SIG_BLOCK, {signal.SIGINT})
                 try:
                     process = self._popen(
-                    [f"/proc/self/fd/{executable.fd}", "app-server", "--listen", "stdio://"],
+                    [f"/proc/self/fd/{target.executable_fd}", "app-server", "--listen", "stdio://"],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    env={"HOME": f"/proc/self/fd/{home.fd}", "PATH": os.defpath,
+                    env={"HOME": f"/proc/self/fd/{target.home_fd}", "PATH": os.defpath,
                          "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}, shell=False,
-                    bufsize=0, close_fds=True, pass_fds=(executable.fd, home.fd),
+                    bufsize=0, close_fds=True,
+                    pass_fds=(target.executable_fd, target.home_fd),
                     )
                     owned_child = _OwnedChildCleanup(process, None)
                 finally:
@@ -292,9 +287,7 @@ class ReadOnlyProjectListClient:
             except OSError as error:
                 raise StartupError("app-server startup failed") from error
             finally:
-                os.close(executable.fd)
-                os.close(home.fd)
-                executable = home = None
+                target.close()
             # Popen transfers ownership of this exact child immediately.  Keep
             # that ownership even if transport initialization only partially
             # succeeds and raises.
@@ -358,10 +351,7 @@ class ReadOnlyProjectListClient:
                 category=f"{category.replace('/', '_')}_transport_failure",
             ) from error
         finally:
-            if executable is not None:
-                os.close(executable.fd)
-            if home is not None:
-                os.close(home.fd)
+            target.close()
             if (owned_child is not None and not owned_child.started and
                     not owned_child.protection_failed):
                 self._cleanup(owned_child)
@@ -522,7 +512,10 @@ class ReadOnlyProjectListClient:
                             owned_child.process = None
                             owned_child.transport = None
                         if getattr(transport, "_supports_terminal_drain", False) is True:
-                            transport.close()
+                            try:
+                                transport.close()
+                            except Exception:
+                                failures.append("transport")
                         state = "terminal"
                 except KeyboardInterrupt:
                     owned_child.interrupted = True

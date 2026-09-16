@@ -13,7 +13,7 @@ PR #9 is historical delivery evidence, not a stable roadmap identity.
 ## Tested HEAD
 
 The implementation and test HEAD validated by both canonical runs was
-`43b0aeb4d59025592ba9c0d831c9de47878379ab`. This evidence document is committed
+`10296e539a0fa3b3f785141e26e7798e681b623e`. This evidence document is committed
 after those runs and does not change runtime or test behavior.
 
 ## Environment
@@ -35,7 +35,7 @@ No personal paths, credentials, or secret values were recorded.
 
 ## Test inventory
 
-Discovery found **232 test cases**. Counts below are discovery counts, not an
+Discovery found **236 test cases**. Counts below are discovery counts, not an
 aspirational target.
 
 | Area | Test file(s) | Test count | Main invariants |
@@ -50,10 +50,10 @@ aspirational target.
 | Mock client | `tests/test_mock_client.py` | 4 | Typed lifecycle, request IDs, server errors, exact response correlation, no retry |
 | Mock safety | `tests/test_mock_safety.py` | 1 | Static denial of process, network, state, discovery, and mutation capabilities |
 | Integration transport with fakes | `tests/test_integration_transport.py` | 33 | Partial I/O, fragmented UTF-8, framing, unpredictable-ID correlation, notifications, limits, deadlines, trailing output, terminal EOF |
-| Integration orchestration with fakes | `tests/test_integration_client.py` | 56 | Authorization, WSL gate, executable/HOME identity, launch ownership, cancellation, cleanup, strict responses, safe evidence |
+| Integration orchestration with fakes | `tests/test_integration_client.py` | 60 | Authorization, WSL gate, executable/HOME identity, launch ownership, cancellation, cleanup, strict responses, safe evidence |
 | Integration/import safety | `tests/test_integration_safety.py` | 7 | Inert imports/runner, lazy signal API lookup, explicit gate, safe categories, no real execution or mutation surface |
 | Packaging/import acceptance | `tests/test_validate_packaging.py` | 27 | Controlled local artifact, inert installed imports, installed origins, mock/integration inclusion, no network/state/process side effects |
-| **Total** | **13 focused test files** | **232** | **Complete deterministic offline suite** |
+| **Total** | **13 focused test files** | **236** | **Complete deterministic offline suite** |
 
 ## Regression coverage
 
@@ -73,7 +73,7 @@ Coverage verifies absolute operator-selected targets; rejection of symlinks,
 non-regular files, non-ELF files, and non-directories; `O_NOFOLLOW`,
 nonblocking executable validation, retained validated executable and HOME
 objects, descriptor-backed execution, pathname replacement resistance,
-descriptor ownership/closure, and privacy-safe translation of validation
+descriptor ownership/closure through cancellation-safe caller-owned validation, and privacy-safe translation of validation
 filesystem errors.
 
 ### Cancellation and process ownership
@@ -81,7 +81,7 @@ filesystem errors.
 Coverage verifies cancellation during validation and spawn/ownership handoff,
 SIGINT masking and bounded acquisition, retained exact-child ownership,
 truthful terminate/kill delivery state, absolute cleanup deadlines, bounded
-escalation, child reaping, stdout EOF, descriptor-close failure behavior, and
+escalation, child reaping, stdout EOF, descriptor-close failure behavior—including terminal selector close failures—and
 cleanup-error precedence. Graceful cleanup additionally requires a zero child
 exit status; spontaneous positive or signal-style nonzero statuses fail closed,
 while nonzero statuses after truthfully delivered terminate/kill escalation
@@ -126,7 +126,7 @@ Every discovered focused test file was executed independently.
 | `python3 tests/test_mock_client.py` | PASS — 4 tests |
 | `python3 tests/test_mock_safety.py` | PASS — 1 test |
 | `python3 tests/test_integration_transport.py` | PASS — 33 tests |
-| `python3 tests/test_integration_client.py` | PASS — 56 tests |
+| `python3 tests/test_integration_client.py` | PASS — 60 tests |
 | `python3 tests/test_integration_safety.py` | PASS — 7 tests |
 | `python3 tests/test_validate_packaging.py` | PASS — 27 tests |
 
@@ -137,8 +137,8 @@ skipped, and the count and outcome were equivalent.
 
 | Run | Tests | Passed | Failed | Errors | Skipped | Reported time |
 |---|---:|---:|---:|---:|---:|---:|
-| 1 | 232 | 232 | 0 | 0 | 0 | 12.305s |
-| 2 | 232 | 232 | 0 | 0 | 0 | 14.284s |
+| 1 | 236 | 236 | 0 | 0 | 0 | 11.067s |
+| 2 | 236 | 236 | 0 | 0 | 0 | 10.873s |
 
 ## Packaging and static checks
 

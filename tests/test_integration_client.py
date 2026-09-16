@@ -8,7 +8,7 @@ from codex_wsl_rpc.integration import IntegrationAuthorization, IntegrationError
 from codex_wsl_rpc.integration.client import (CleanupError, InvalidTargetError,
     OperatorCancelledError, PINNED_CODEX_SHA, StartupError,
     UnsupportedPlatformError, UnsupportedTargetError, _OwnedChildCleanup,
-    _SignalDelivery, _is_wsl_kernel_release)
+    _SignalDelivery, _ValidatedTarget, _is_wsl_kernel_release)
 from codex_wsl_rpc.integration.transport import TransportError
 from codex_wsl_rpc.protocol import SuccessResponse
 
@@ -299,9 +299,11 @@ class ClientTests(unittest.TestCase):
         target = self.home.with_name("target-home")
         self.home.rename(target)
         self.home.symlink_to(target, target_is_directory=True)
-        with self.assertRaises(InvalidTargetError): self._client()._validate()
+        with self.assertRaises(InvalidTargetError):
+            self._client()._validate(_ValidatedTarget())
         self.home.unlink(); self.home.write_text("not a directory")
-        with self.assertRaises(InvalidTargetError): self._client()._validate()
+        with self.assertRaises(InvalidTargetError):
+            self._client()._validate(_ValidatedTarget())
 
     def test_strict_integration_shapes_require_every_serialized_member(self):
         initialize = {"userAgent":"ua","codexHome":"/home","platformFamily":"unix","platformOs":"linux"}
@@ -349,7 +351,9 @@ class ClientTests(unittest.TestCase):
                     st_mode=mode, st_dev=regular.st_dev, st_ino=regular.st_ino
                 )
                 with self.assertRaises(UnsupportedTargetError):
-                    self._client(_lstat=lambda path, value=path_status: value)._validate()
+                    self._client(_lstat=lambda path, value=path_status: value)._validate(
+                        _ValidatedTarget()
+                    )
                 opened.assert_not_called()
 
     def test_validation_open_is_nonblocking_and_rejects_replaced_fifo(self):
@@ -364,7 +368,7 @@ class ClientTests(unittest.TestCase):
                 mock.patch("codex_wsl_rpc.integration.client.os.pread") as pread, \
                 mock.patch("codex_wsl_rpc.integration.client.os.close") as closed:
             with self.assertRaises(UnsupportedTargetError):
-                self._client()._validate()
+                self._client()._validate(_ValidatedTarget())
         flags = opened.call_args.args[1]
         self.assertEqual(flags & getattr(os, "O_NONBLOCK", 0),
                          getattr(os, "O_NONBLOCK", 0))
@@ -428,7 +432,39 @@ class ClientTests(unittest.TestCase):
         for fd in opened_fds:
             with self.assertRaises(OSError):
                 os.fstat(fd)
+
+    def test_validation_owner_exists_before_acquisition_and_closes_on_no_return(self):
+        popen = mock.Mock()
+        observed_target = None
+
+        def cancelled_validation(target):
+            nonlocal observed_target
+            observed_target = target
+            target.executable_fd = os.open(self.exe, os.O_RDONLY)
+            target.home_fd = os.open(self.home, os.O_RDONLY)
+            raise KeyboardInterrupt()
+
+        client = self._client(_popen=popen)
+        with mock.patch.object(client, "_validate", side_effect=cancelled_validation):
+            with self.assertRaises(OperatorCancelledError):
+                client.list_one_page()
+
+        self.assertIsNotNone(observed_target)
+        self.assertIsNone(observed_target.executable_fd)
+        self.assertIsNone(observed_target.home_fd)
         popen.assert_not_called()
+
+    def test_successful_validation_populates_preowned_target_without_return_handoff(self):
+        target = _ValidatedTarget()
+        client = self._client()
+        self.assertIsNone(client._validate(target))
+        try:
+            self.assertIsNotNone(os.fstat(target.executable_fd))
+            self.assertIsNotNone(os.fstat(target.home_fd))
+        finally:
+            target.close()
+        self.assertIsNone(target.executable_fd)
+        self.assertIsNone(target.home_fd)
 
     def test_codex_home_category_is_derived_without_exposing_raw_path(self):
         cases = (
@@ -516,6 +552,56 @@ class ClientTests(unittest.TestCase):
         self.assertTrue(state.completed)
         self.assertIsNone(state.process)
         self.assertTrue(transport.closed)
+
+    def test_terminal_transport_close_failure_is_safe_for_all_cleanup_outcomes(self):
+        cases = (
+            ([(True, True)], 0, "graceful"),
+            ([(False, False), (True, True)], -15, "terminated_owned_child"),
+            ([(False, False), (False, False), (True, True)], -9,
+             "killed_owned_child"),
+        )
+        for states, returncode, expected_outcome in cases:
+            with self.subTest(outcome=expected_outcome):
+                process = CleanupProcess([])
+                process.returncode = returncode if states == [(True, True)] else None
+                transport = TerminalCleanupTransport(states)
+                transport.close = mock.Mock(
+                    side_effect=OSError("selector /private/path epoll details")
+                )
+                state = _OwnedChildCleanup(process, transport)
+
+                def terminate():
+                    process.returncode = -15
+
+                def kill():
+                    process.returncode = -9
+
+                process.terminate.side_effect = terminate
+                process.kill.side_effect = kill
+                with self.assertRaises(CleanupError) as caught:
+                    self._client()._cleanup(state)
+
+                self.assertEqual(caught.exception.category, "cleanup_failure")
+                self.assertEqual(str(caught.exception), "owned-child cleanup failed")
+                self.assertNotIn("private", str(caught.exception))
+                self.assertNotIn("epoll", str(caught.exception))
+                self.assertTrue(state.completed)
+                expected_terminate = expected_outcome != "graceful"
+                expected_kill = expected_outcome == "killed_owned_child"
+                self.assertEqual(bool(process.terminate.call_count), expected_terminate)
+                self.assertEqual(bool(process.kill.call_count), expected_kill)
+
+    def test_terminal_close_failure_does_not_mask_existing_cleanup_failure(self):
+        process = CleanupProcess([])
+        process.returncode = 1
+        transport = TerminalCleanupTransport([(True, True)])
+        transport.close = mock.Mock(side_effect=OSError("secondary selector detail"))
+
+        with self.assertRaises(CleanupError) as caught:
+            self._client()._cleanup(_OwnedChildCleanup(process, transport))
+
+        self.assertEqual(str(caught.exception), "owned-child cleanup failed")
+        self.assertIsNone(caught.exception.__cause__)
 
     def test_graceful_cleanup_requires_zero_exit_status(self):
         for returncode in (1, 23, -9):
