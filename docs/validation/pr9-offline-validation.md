@@ -12,10 +12,16 @@ PR #9 is historical delivery evidence, not a stable roadmap identity.
 
 ## Tested HEAD
 
-The implementation and test HEAD validated by both canonical runs was
-`aa91f1fbdede59b5cdafdd49b0990891b602a0c3`. This reachable runtime/test commit
-is the parent of the documentation-only evidence commit and remains in branch
-history.
+Tested commit: `cc216bf6131e8d093eccde1df37ddcb9733a8316`.
+
+Commit reachability: **VERIFIED before and after validation**. Validation
+occurred while `HEAD` was exactly the tested commit, and the working tree was
+clean before testing and after all checks completed.
+
+A previous evidence revision referenced a non-reconstructible intermediate
+identifier. Fresh validation was therefore rerun against the durable GitHub PR
+commit recorded here. The previous identifier is not authoritative evidence for
+this validation.
 
 ## Environment
 
@@ -143,8 +149,8 @@ skipped, and the count and outcome were equivalent.
 
 | Run | Tests | Passed | Failed | Errors | Skipped | Reported time |
 |---|---:|---:|---:|---:|---:|---:|
-| 1 | 242 | 242 | 0 | 0 | 0 | 16.425s |
-| 2 | 242 | 242 | 0 | 0 | 0 | 20.505s |
+| 1 | 242 | 242 | 0 | 0 | 0 | 18.354s |
+| 2 | 242 | 242 | 0 | 0 | 0 | 18.281s |
 
 ## Packaging and static checks
 
