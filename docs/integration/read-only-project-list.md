@@ -2,19 +2,19 @@
 
 ## Status and scope
 
-Phase A Cloud/offline implementation is **COMPLETE**. Local WSL validation is
-**PENDING**. Subdivision 2.3 is **IN PROGRESS**, capability remains
-`MOCK_ONLY`, mutation authorization remains `NONE`, and `GATE-002` is
-`UNSATISFIED`. The branch contains an executable integration path governed by
-BIN-002, but neither Codex nor a real RPC was run in Cloud.
+Phase A Cloud/offline implementation and one explicitly authorized local WSL
+validation are **COMPLETE**. Subdivision 2.3 is **IMPLEMENTED**, capability is
+`READ_ONLY`, mutation authorization remains `NONE`, and `GATE-002` is
+`SATISFIED`. Codex Cloud did not execute or independently observe the real run;
+the evidence was supplied by the human operator.
 
-The only supported future flow is Python in WSL -> an operator-selected native
+The only supported flow is Python in WSL -> an operator-selected native
 Codex executable -> an owned app-server child over stdio -> `initialize` ->
 `initialized` -> exactly one `project/list` page -> safe summary -> bounded
 cleanup. There is no Desktop attachment, pagination, path conversion, network
 transport, state inspection, mutation, general RPC API, or arbitrary argv.
 
-## Policy boundary and future authorization
+## Policy boundary and authorization
 
 The operator must separately approve BIN-002, PATH-004, the selected executable,
 and one real `project/list` exercise at the reviewed commit. The
@@ -114,7 +114,7 @@ state impact, network effects, and helper-process effects are each reported as
 includes Project names/IDs, roots, metadata, cursor, raw Codex home, stderr,
 credentials, executable path, or server error text/data.
 
-After separate approval, the operator workflow is:
+The validated operator workflow was:
 
 ```console
 python3 tools/run_read_only_project_list.py \
@@ -130,18 +130,28 @@ operator-confirmed/code-unverified provenance category, unobserved version,
 whether product/network/helper effects were observed—never raw Projects or
 paths.
 
-## LOCAL VALIDATION BLOCKERS
+## Demonstrated capability and Desktop comparison
 
-- **NET-003:** pinned-source review has not established that normal product
-  startup and this flow make no outbound product network calls. Pipe-only
-  Python transport does not prove product network isolation.
-- **BIN-002 helper behavior:** pinned-source review has not established the
-  complete helper/descendant process behavior of normal startup. No helper
-  execution is authorized by Phase A.
-- Independent proof of installed executable provenance and mapping to the pinned
-  SHA remains absent; operator confirmation is not such proof.
-- Product startup filesystem effects, shared state with Desktop, returned-page
-  correspondence, and Desktop visibility remain `NOT_ESTABLISHED`.
+One approved Windows 11 / WSL2 / Ubuntu 24.04.4 LTS exercise used the runner's
+own app-server child and the exact flow `initialize`, `initialized`, and
+`project/list`. Initialization and listing succeeded, a valid empty page was
+returned with `has_more=false`, and cleanup was graceful. No mutation was
+attempted and repository code did not directly inspect Codex state.
 
-No local run may occur until these blockers receive human review and the exact
-single exercise is authorized.
+The already-open Desktop UI displayed multiple Projects in the same tested
+context. The independently launched app-server result therefore has the
+classification `DIVERGENCE_OBSERVED`. This does not diagnose the cause or prove
+separate stores, different homes or authentication, a migration or sync defect,
+or that `project/list` is broken. Desktop correspondence remains unestablished.
+
+## Remaining limitations
+
+- Product network effects, helper-process effects, and product-state impact are
+  `NOT_ESTABLISHED`.
+- Installed executable mapping to the pinned source SHA and target version are
+  `NOT_ESTABLISHED` / unobserved.
+- Filesystem-side-effect-free startup, universal behavior across versions,
+  path-adaptation correctness, mutation safety, and create/update behavior are
+  not established.
+- The validation establishes one read-only context only; it is not a universal
+  Desktop workaround.

@@ -175,6 +175,10 @@ Still required are explicit human authorization, local Windows/WSL real-product
 validation, the exact `initialize` / `initialized` / `project/list` exercise,
 sanitized evidence, and a final gate decision.
 
+Those later steps are recorded separately in
+[`pr9-real-wsl-validation.md`](pr9-real-wsl-validation.md). This section remains
+the historical conclusion of the offline validation record.
+
 ## Result
 
 `OFFLINE_VALIDATION_PASS`

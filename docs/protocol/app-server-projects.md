@@ -437,13 +437,14 @@ research but are now delivered by Delivery 3. That delivery is limited to the
 JSON-line transport and fixture store, the fake app-server lifecycle, and
 deterministic mock `project/list` behavior.
 
-Phase A now delivers a gated, offline-tested stdio integration path for
-`initialize`, `initialized`, and one `project/list` page. It has not been
-executed against an installed Codex product, and local WSL validation remains
-`NOT RUN`; capability therefore remains `MOCK_ONLY` and GATE-002 remains
-`UNSATISFIED`. Real product execution, Unix socket or WebSocket/TCP transport,
-attachment to a Desktop-owned app-server, and real Project-store validation
-remain explicit non-goals for this delivery. Access to
+Phase A delivers a gated, offline-tested stdio integration path for
+`initialize`, `initialized`, and one `project/list` page. One explicitly
+authorized local WSL validation subsequently exercised that exact path
+successfully; capability is therefore `READ_ONLY` and GATE-002 is `SATISFIED`.
+The returned empty page diverged from the non-empty Desktop-visible Project
+list, and the cause remains `NOT_ESTABLISHED`. Unix socket or WebSocket/TCP
+transport and attachment to a Desktop-owned app-server remain explicit
+non-goals. Access to
 `~/.codex`, SQLite, Desktop configuration or state, and Windows/WSL path
 adaptation also remains deferred, as do Desktop sidebar/store equivalence
 claims. Mutation authorization remains `NONE`:

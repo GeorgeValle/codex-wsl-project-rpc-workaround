@@ -1,9 +1,10 @@
 # Codex WSL Project RPC Workaround
 
 > **Experimental and unofficial.** This project is not affiliated with or
-> endorsed by OpenAI. The repository has a deterministic **mock-only** protocol
-> capability. It contains a separately gated, unexercised read-only integration
-> path, but has performed no real Codex RPC operations.
+> endorsed by OpenAI. The repository has a narrowly scoped **read-only**
+> capability. One explicitly authorized local WSL validation successfully ran
+> `initialize`, sent `initialized`, and ran `project/list`; no mutation capability
+> exists.
 
 ## Project purpose
 
@@ -12,8 +13,10 @@ observed by a Windows + WSL user. Its long-term goal is safe, auditable
 management of Codex Desktop Projects while the WSL backend remains enabled.
 The mock transport, server, and client exercise synthetic Project fixtures
 without accessing Desktop or user state. The gated one-page integration is
-documented in [`docs/integration/read-only-project-list.md`](docs/integration/read-only-project-list.md);
-local validation and all mutation remain unauthorized.
+documented in [`docs/integration/read-only-project-list.md`](docs/integration/read-only-project-list.md).
+The human-provided real-validation evidence is recorded in
+[`docs/validation/pr9-real-wsl-validation.md`](docs/validation/pr9-real-wsl-validation.md),
+and all mutation remains unauthorized.
 
 ## Incident that motivated the project
 
@@ -77,9 +80,12 @@ and experimental Project-management RPC functionality exposed by app-server.
 The objective is to manage Projects without relying on the broken Desktop
 Project registration path.
 
-Potential future operations are read-only Project listing, controlled Project
-creation, and controlled Project update. The current `MOCK_ONLY` capability
-implements none of those operations against a real Codex installation.
+Read-only Project listing has been demonstrated once against an
+operator-selected Codex Desktop WSL executable. The independently launched
+app-server returned a valid empty page, while the already-open Desktop UI showed
+multiple Projects. That divergence is observed but unexplained; it does not
+establish Desktop/app-server store equivalence or a universal workaround.
+Controlled Project creation and update remain future, separately gated work.
 
 ## Staged progression
 

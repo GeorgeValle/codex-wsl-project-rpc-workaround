@@ -9,7 +9,7 @@ wire contract exists.
 | [2.1](subdivision-2.1-protocol-research.md) | Public Codex app-server protocol research | IMPLEMENTED |
 | 2.2 | Mock protocol transport and schemas | IMPLEMENTED — Deliveries 1–3 and the incident-evidence documentation follow-up are implemented |
 | Governance prerequisite for 2.3 | Bounded product-under-test execution policy | IMPLEMENTED — policy clarification only; no real execution or RPC |
-| 2.3 | Read-only real `project/list` integration | IN PROGRESS — Cloud/offline implementation COMPLETE; local WSL validation PENDING; capability MOCK_ONLY; mutation authorization NONE; GATE-002 UNSATISFIED |
+| 2.3 | Read-only real `project/list` integration | IMPLEMENTED — offline implementation and one authorized local WSL validation COMPLETE; capability READ_ONLY; mutation authorization NONE; GATE-002 SATISFIED |
 
 Capability progression remains governed by `GATE-001` through `GATE-003` in
 the [requirements](../../../projects-requirements.md). Completion of one
@@ -40,11 +40,15 @@ real product process, and does not change the `MOCK_ONLY` capability or `NONE`
 mutation authorization. `GATE-002` remains `UNSATISFIED`; the policy
 clarification alone does not establish `READ_ONLY` capability.
 
-Subdivision 2.3 is `IN PROGRESS`: Cloud/offline implementation is `COMPLETE`
-and local WSL validation is `PENDING`. Capability remains `MOCK_ONLY`, mutation
-authorization remains `NONE`, and `GATE-002` remains `UNSATISFIED`. It is separately human-gated for real execution
-and real validation of read-only `project/list`. A future review may consider
-an explicit operator-selected WSL Codex/app-server executable, stdio only,
-`initialize`, the `initialized` notification, `project/list`, and real local
-validation. None of those runtime actions is authorized by this governance
-delivery. Network transport and all Project mutation remain unauthorized.
+Subdivision 2.3 is `IMPLEMENTED`. PR #9 is historical delivery evidence for the
+offline implementation and one explicitly authorized local WSL validation of
+`initialize`, the `initialized` notification, and `project/list`. Public
+protocol provenance, validated schemas and fake transport, deny-by-default
+failure behavior, clean Code Review and Security Review, and the successful real
+read-only exercise satisfy the current `GATE-002` and `READ_ONLY` criteria.
+
+Capability is `READ_ONLY`, `GATE-002` is `SATISFIED`, and mutation authorization
+remains `NONE`. The independently launched app-server returned an empty page
+while Desktop displayed multiple Projects; the cause and Desktop correspondence
+remain `NOT_ESTABLISHED`. Block 3 remains separately human-gated. Network
+transport and all Project mutation remain unauthorized.
