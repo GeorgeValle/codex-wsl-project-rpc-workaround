@@ -1,6 +1,7 @@
 """Offline tests for the bounded real-stream implementation."""
 from __future__ import annotations
-import json, os, sys, threading, time, unittest
+import json, os, selectors, sys, threading, time, unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -23,6 +24,16 @@ class _Process:
         for fd in (self.stdin_reader, self.stdout_writer, self.stderr_writer):
             try: os.close(fd)
             except OSError: pass
+
+class _AdvancingClock:
+    def __init__(self, step=1.0): self.now=0.0; self.step=step
+    def __call__(self):
+        value=self.now; self.now += self.step; return value
+
+class _AlwaysReadySelector:
+    def __init__(self, stream, event): self.key=SimpleNamespace(fileobj=stream, data=event); self.timeouts=[]
+    def select(self, timeout=None): self.timeouts.append(timeout); return [(self.key, selectors.EVENT_READ)]
+    def close(self): pass
 
 class TransportTests(unittest.TestCase):
     def setUp(self): self.process = _Process(); self.transport = _StreamTransport(self.process)
@@ -245,6 +256,63 @@ class TransportTests(unittest.TestCase):
         self.transport._selector.select = observed_select
         self._send_request(1, "initialize")
         self.assertEqual(calls, [0])
+
+    def test_phase_deadline_bounds_continuously_ready_pre_request_input(self):
+        for method, event in (("initialize", "stdout"), ("initialize", "stderr"),
+                              ("project/list", "stdout"), ("project/list", "stderr")):
+            with self.subTest(method=method, event=event):
+                process = _Process(); clock = _AdvancingClock()
+                transport = _StreamTransport(process, clock=clock)
+                stream = process.stdout if event == "stdout" else process.stderr
+                transport._selector = _AlwaysReadySelector(stream, event)
+                try:
+                    with mock.patch("codex_wsl_rpc.integration.transport.os.read", return_value=b"x"):
+                        with self.assertRaisesRegex(TransportError, "^write timeout$"):
+                            transport.send(Request("phase-id", method, {}), 4.0)
+                    self.assertIsNone(transport._outstanding_request_id)
+                    os.set_blocking(process.stdin_reader, False)
+                    with self.assertRaises(BlockingIOError): os.read(process.stdin_reader, 4096)
+                    self.assertTrue(all(timeout == 0 for timeout in transport._selector.timeouts))
+                finally:
+                    process.stdin.close(); process.stdout.close(); process.stderr.close(); process.close()
+
+    def test_trailing_ready_input_uses_original_response_deadline(self):
+        clock = _AdvancingClock()
+        process = _Process(); transport = _StreamTransport(process, clock=clock)
+        transport._outstanding_request_id = "expected"
+        transport._buffer.extend(b'{"id":"expected","result":{}}\n')
+        transport._selector = _AlwaysReadySelector(process.stderr, "stderr")
+        try:
+            with mock.patch("codex_wsl_rpc.integration.transport.os.read", return_value=b"x"):
+                with self.assertRaisesRegex(TransportError, "^response timeout$"):
+                    transport.receive_response("expected", 4.0)
+            self.assertEqual(transport._outstanding_request_id, "expected")
+        finally:
+            process.stdin.close(); process.stdout.close(); process.stderr.close(); process.close()
+
+    def test_resource_limit_can_precede_drain_timeout_and_bounded_drain_succeeds(self):
+        process = _Process(); clock = _AdvancingClock(step=0.1)
+        transport = _StreamTransport(process, clock=clock)
+        transport._selector = _AlwaysReadySelector(process.stderr, "stderr")
+        try:
+            with mock.patch("codex_wsl_rpc.integration.transport.MAX_STDERR_TOTAL", 1), \
+                 mock.patch("codex_wsl_rpc.integration.transport.os.read", return_value=b"xx"):
+                with self.assertRaisesRegex(TransportError, "stderr resource limit"):
+                    transport.send(Request("limit", "initialize", {}), 10.0)
+        finally:
+            process.stdin.close(); process.stdout.close(); process.stderr.close(); process.close()
+
+        process = _Process(); clock = _AdvancingClock(step=0.1)
+        transport = _StreamTransport(process, clock=clock)
+        events = iter([[(SimpleNamespace(fileobj=process.stderr, data="stderr"), selectors.EVENT_READ)], []])
+        transport._selector.select = lambda timeout=None: next(events)
+        try:
+            with mock.patch("codex_wsl_rpc.integration.transport.os.read", return_value=b"x"):
+                transport.send(Request("bounded", "initialize", {}), 10.0)
+            self.assertEqual(os.read(process.stdin_reader, 4096),
+                             b'{"id":"bounded","method":"initialize","params":{}}\n')
+        finally:
+            transport.close(); process.stdin.close(); process.stdout.close(); process.stderr.close(); process.close()
 
     def test_prebuffered_server_request_and_second_outstanding_request_fail_closed(self):
         self.transport._buffer.extend(b'{"id":9,"method":"server/call"}\n')

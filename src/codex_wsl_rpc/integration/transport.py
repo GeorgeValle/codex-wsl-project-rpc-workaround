@@ -150,7 +150,7 @@ class _StreamTransport:
         if isinstance(envelope, Request):
             if self._outstanding_request_id is not None:
                 raise TransportError("request already outstanding")
-            self._reject_preexisting_input()
+            self._reject_preexisting_input(deadline)
             self._outstanding_request_id = envelope.id
         payload = json.dumps(envelope.to_wire(), separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
         view = memoryview(payload)
@@ -189,7 +189,7 @@ class _StreamTransport:
                     raise TransportError("unexpected server request")
                 if type(envelope.id) is not type(expected_id) or envelope.id != expected_id:
                     raise TransportError("response correlation error")
-                self._reject_trailing_frames()
+                self._reject_trailing_frames(deadline)
                 self._outstanding_request_id = None
                 return envelope
             remaining = deadline - self._clock()
@@ -224,15 +224,19 @@ class _StreamTransport:
                     if b"\n" not in self._buffer and len(self._buffer) > MAX_STDOUT_FRAME:
                         raise TransportError("stdout frame limit")
 
-    def _reject_preexisting_input(self) -> None:
+    def _reject_preexisting_input(self, deadline: float) -> None:
         """Nonblockingly drain input that predates a request and fail closed."""
         self._reject_received_input(
-            "preexisting incomplete frame", self._reject_preexisting_frames, reject_eof=True)
+            "preexisting incomplete frame", self._reject_preexisting_frames,
+            deadline=deadline, timeout_message="write timeout", reject_eof=True)
 
     def _reject_received_input(self, incomplete_message: str,
-                               reject_frames: Callable[[], None], *, reject_eof: bool) -> None:
+                               reject_frames: Callable[[], None], *, deadline: float,
+                               timeout_message: str, reject_eof: bool) -> None:
         """Drain immediately readable input, classify frames, and reject leftovers."""
         while True:
+            if deadline - self._clock() <= 0:
+                raise TransportError(timeout_message)
             reject_frames()
             events = self._selector.select(0)
             if not events:
@@ -240,6 +244,8 @@ class _StreamTransport:
                     raise TransportError(incomplete_message)
                 return
             for key, _ in events:
+                if deadline - self._clock() <= 0:
+                    raise TransportError(timeout_message)
                 try:
                     chunk = os.read(key.fileobj.fileno(), 65536)
                 except BlockingIOError:
@@ -278,10 +284,11 @@ class _StreamTransport:
             else:
                 raise TransportError("response correlation error")
 
-    def _reject_trailing_frames(self) -> None:
+    def _reject_trailing_frames(self, deadline: float) -> None:
         """Drain and classify all already-received input before final success."""
         self._reject_received_input(
-            "trailing incomplete frame", self._reject_buffered_trailing_frames, reject_eof=False)
+            "trailing incomplete frame", self._reject_buffered_trailing_frames,
+            deadline=deadline, timeout_message="response timeout", reject_eof=False)
 
     def _reject_buffered_trailing_frames(self) -> None:
         while (frame := self._take_frame()) is not None:
