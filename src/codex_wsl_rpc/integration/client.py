@@ -111,13 +111,56 @@ class _ValidatedTarget:
     executable_fd: int | None = None
     home_fd: int | None = None
 
+    def release(self) -> list[str]:
+        """Relinquish each descriptor before its fallible, non-retryable close."""
+        failures: list[str] = []
+        for name in ("home_fd", "executable_fd"):
+            fd = getattr(self, name)
+            setattr(self, name, None)
+            if fd is None:
+                continue
+            try:
+                os.close(fd)
+            except (OSError, KeyboardInterrupt):
+                # close(2) may have succeeded before Python observed failure.
+                # Retrying the numeric fd could close an unrelated reused fd.
+                failures.append(name)
+        return failures
+
     def close(self) -> None:
-        if self.home_fd is not None:
-            os.close(self.home_fd)
-            self.home_fd = None
-        if self.executable_fd is not None:
-            os.close(self.executable_fd)
-            self.executable_fd = None
+        """Compatibility shim for tests; release remains take-before-close."""
+        if self.release():
+            raise CleanupError("validation descriptor release failed")
+
+
+@dataclass(slots=True)
+class _IntegrationLifecycle:
+    """Private owner for this integration's mandatory finalization work."""
+    target: _ValidatedTarget
+    child: _OwnedChildCleanup | None = None
+    transport: object | None = None
+    deferred_cancellation: bool = False
+    primary_failure: BaseException | None = None
+    finalization_failures: list[str] | None = None
+
+    def finalize(self, cleanup: Callable[[_OwnedChildCleanup], str]) -> str | None:
+        failures = self.finalization_failures = []
+        outcome = None
+        # Child safety is independent of auxiliary descriptor release.
+        if (self.child is not None and not self.child.started and
+                not self.child.protection_failed):
+            try:
+                outcome = cleanup(self.child)
+            except OperatorCancelledError:
+                self.deferred_cancellation = True
+            except CleanupError:
+                failures.append("child")
+        failures.extend(self.target.release())
+        if failures:
+            raise CleanupError("integration finalization failed")
+        if self.deferred_cancellation:
+            raise OperatorCancelledError("operator cancelled")
+        return outcome
 
 def _path_category(path: str) -> str:
     if not path: return "empty"
@@ -180,7 +223,6 @@ class ReadOnlyProjectListClient:
         return _is_wsl_kernel_release(release)
 
     def _validate(self, target: _ValidatedTarget) -> None:
-        completed = False
         try:
             if self._authorization is not IntegrationAuthorization.READ_ONLY_PROJECT_LIST:
                 raise AuthorizationError("explicit read-only authorization is missing")
@@ -190,7 +232,7 @@ class ReadOnlyProjectListClient:
             if not path.is_absolute():
                 raise InvalidTargetError("target must be an existing absolute path")
             flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
-                     getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+                 getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
             try:
                 path_status = self._lstat(path)
             except OSError:
@@ -205,11 +247,11 @@ class ReadOnlyProjectListClient:
             except OSError as error:
                 raise InvalidTargetError("target could not be validated") from error
             if (stat.S_ISLNK(path_status.st_mode) or
-                    not stat.S_ISREG(opened_status.st_mode) or
-                    not opened_status.st_mode & 0o111):
+                not stat.S_ISREG(opened_status.st_mode) or
+                not opened_status.st_mode & 0o111):
                 raise UnsupportedTargetError("target must be a reviewed executable regular file")
             if ((path_status.st_dev, path_status.st_ino) !=
-                    (opened_status.st_dev, opened_status.st_ino)):
+                (opened_status.st_dev, opened_status.st_ino)):
                 raise InvalidTargetError("target identity changed during validation")
             try:
                 header = os.pread(target.executable_fd, 4, 0)
@@ -218,10 +260,9 @@ class ReadOnlyProjectListClient:
             if header != b"\x7fELF":
                 raise UnsupportedTargetError("target must be the reviewed concrete native executable")
             self._validate_home(target)
-            completed = True
-        finally:
-            if not completed:
-                target.close()
+        except (Exception, KeyboardInterrupt):
+            target.release()
+            raise
 
     def _validate_home(self, target: _ValidatedTarget) -> None:
         if not self._home_path.is_absolute():
@@ -261,6 +302,7 @@ class ReadOnlyProjectListClient:
 
     def list_one_page(self) -> ProjectListRunResult:
         target = _ValidatedTarget()
+        lifecycle = _IntegrationLifecycle(target)
         process = transport = None
         owned_child = None
         cleanup = "not_started"
@@ -282,12 +324,15 @@ class ReadOnlyProjectListClient:
                     pass_fds=(target.executable_fd, target.home_fd),
                     )
                     owned_child = _OwnedChildCleanup(process, None)
+                    lifecycle.child = owned_child
                 finally:
                     sigmask(signal.SIG_SETMASK, previous_mask)
             except OSError as error:
                 raise StartupError("app-server startup failed") from error
             finally:
-                target.close()
+                release_failures = target.release()
+                if release_failures:
+                    raise CleanupError("validation descriptor release failed")
             # Popen transfers ownership of this exact child immediately.  Keep
             # that ownership even if transport initialization only partially
             # succeeds and raises.
@@ -296,6 +341,7 @@ class ReadOnlyProjectListClient:
             except Exception as error:
                 raise StartupError("transport initialization failed") from error
             owned_child.transport = transport
+            lifecycle.transport = transport
             init_deadline = self._clock() + INITIALIZE_TIMEOUT
             params = InitializeParams(ClientInfo("codex-wsl-rpc-read-only", "1"), InitializeCapabilities(experimental_api=True))
             initialize_id = self._next_request_id(request_ids)
@@ -343,6 +389,7 @@ class ReadOnlyProjectListClient:
                 categories, cleanup)
             return ProjectListRunResult(summary)
         except KeyboardInterrupt as error:
+            lifecycle.deferred_cancellation = True
             raise OperatorCancelledError("operator cancelled") from error
         except TransportError as error:
             category = "initialize" if phase in {"initialize_send", "initialize_wait", "initialized_send"} else "project/list"
@@ -351,10 +398,7 @@ class ReadOnlyProjectListClient:
                 category=f"{category.replace('/', '_')}_transport_failure",
             ) from error
         finally:
-            target.close()
-            if (owned_child is not None and not owned_child.started and
-                    not owned_child.protection_failed):
-                self._cleanup(owned_child)
+            lifecycle.finalize(self._cleanup)
 
     def _cleanup(self, owned_child: _OwnedChildCleanup) -> str:
         """Finish one bounded cleanup lifecycle, deferring Ctrl+C until reap."""

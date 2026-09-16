@@ -31,7 +31,10 @@ class _StreamTransport:
                  selector_factory=selectors.DefaultSelector) -> None:
         self._process = process
         self._clock = clock
-        self._selector = selector_factory()
+        try:
+            self._selector = selector_factory()
+        except (OSError, ValueError) as error:
+            raise TransportError("transport setup failure") from error
         self._buffer = bytearray()
         self._stdout_total = 0
         self._stderr_total = 0
@@ -42,13 +45,46 @@ class _StreamTransport:
         self._unusable = False
         self._stdout_eof = False
         self._terminal_error: TransportError | None = None
-        for stream, event in ((process.stdout, "stdout"), (process.stderr, "stderr")):
-            os.set_blocking(stream.fileno(), False)
-            self._selector.register(stream, selectors.EVENT_READ, event)
-        os.set_blocking(process.stdin.fileno(), False)
+        try:
+            for stream, event in ((process.stdout, "stdout"), (process.stderr, "stderr")):
+                os.set_blocking(stream.fileno(), False)
+                self._selector.register(stream, selectors.EVENT_READ, event)
+            os.set_blocking(process.stdin.fileno(), False)
+        except (OSError, ValueError, KeyError) as error:
+            try:
+                self._selector.close()
+            except (OSError, ValueError):
+                pass
+            raise TransportError("transport setup failure") from error
 
     def close(self) -> None:
-        self._selector.close()
+        try:
+            self._selector.close()
+        except (OSError, ValueError) as error:
+            raise TransportError("transport close failure") from error
+
+    def _select(self, timeout: float):
+        try:
+            return self._selector.select(timeout)
+        except (OSError, ValueError) as error:
+            raise TransportError("selector failure") from error
+
+    @staticmethod
+    def _read(stream) -> bytes:
+        try:
+            return os.read(stream.fileno(), 65536)
+        except BlockingIOError:
+            raise
+        except (OSError, ValueError) as error:
+            raise TransportError("read failure") from error
+
+    def _unregister(self, stream) -> None:
+        try:
+            self._selector.unregister(stream)
+        except (KeyError, ValueError):
+            pass
+        except OSError as error:
+            raise TransportError("selector failure") from error
 
     @property
     def terminal_error(self) -> TransportError | None:
@@ -65,12 +101,12 @@ class _StreamTransport:
             remaining = deadline - self._clock()
             if remaining <= 0:
                 return reaped, self._stdout_eof
-            events = self._selector.select(remaining)
+            events = self._select(remaining)
             if not events:
                 return self._process_reaped(process), self._stdout_eof
             for key, _ in events:
                 try:
-                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    chunk = self._read(key.fileobj)
                 except BlockingIOError:
                     continue
                 if key.data == "stderr":
@@ -85,8 +121,7 @@ class _StreamTransport:
 
     def _consume_stderr(self, stream, chunk: bytes) -> None:
         if not chunk:
-            try: self._selector.unregister(stream)
-            except (KeyError, ValueError): pass
+            self._unregister(stream)
             return
         self._stderr_total += len(chunk)
         if self._stderr_total > MAX_STDERR_TOTAL:
@@ -96,8 +131,7 @@ class _StreamTransport:
 
     def _consume_terminal_stdout(self, stream, chunk: bytes) -> None:
         if not chunk:
-            try: self._selector.unregister(stream)
-            except (KeyError, ValueError): pass
+            self._unregister(stream)
             self._stdout_eof = True
             if self._buffer:
                 self._remember_terminal_error(TransportError("EOF with incomplete frame"))
@@ -164,12 +198,17 @@ class _StreamTransport:
                     written = 0
                 except BrokenPipeError as error:
                     raise TransportError("broken pipe") from error
+                except (OSError, ValueError) as error:
+                    raise TransportError("write failure") from error
                 if written:
                     view = view[written:]
                     continue
-                with selectors.DefaultSelector() as selector:
-                    selector.register(self._process.stdin, selectors.EVENT_WRITE)
-                    selector.select(max(0.0, deadline - self._clock()))
+                try:
+                    with selectors.DefaultSelector() as selector:
+                        selector.register(self._process.stdin, selectors.EVENT_WRITE)
+                        selector.select(max(0.0, deadline - self._clock()))
+                except (OSError, ValueError, KeyError) as error:
+                    raise TransportError("write failure") from error
         except BaseException:
             if isinstance(envelope, Request):
                 self._unusable = True
@@ -195,17 +234,17 @@ class _StreamTransport:
             remaining = deadline - self._clock()
             if remaining <= 0:
                 raise TransportError("response timeout")
-            events = self._selector.select(remaining)
+            events = self._select(remaining)
             if not events:
                 raise TransportError("response timeout")
             for key, _ in events:
                 try:
-                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    chunk = self._read(key.fileobj)
                 except BlockingIOError:
                     continue
                 if key.data == "stderr":
                     if not chunk:
-                        self._selector.unregister(key.fileobj)
+                        self._unregister(key.fileobj)
                         continue
                     self._stderr_total += len(chunk)
                     if self._stderr_total > MAX_STDERR_TOTAL:
@@ -238,7 +277,7 @@ class _StreamTransport:
             if deadline - self._clock() <= 0:
                 raise TransportError(timeout_message)
             reject_frames()
-            events = self._selector.select(0)
+            events = self._select(0)
             if not events:
                 if self._buffer:
                     raise TransportError(incomplete_message)
@@ -247,12 +286,12 @@ class _StreamTransport:
                 if deadline - self._clock() <= 0:
                     raise TransportError(timeout_message)
                 try:
-                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    chunk = self._read(key.fileobj)
                 except BlockingIOError:
                     continue
                 if key.data == "stderr":
                     if not chunk:
-                        self._selector.unregister(key.fileobj)
+                        self._unregister(key.fileobj)
                         continue
                     self._stderr_total += len(chunk)
                     if self._stderr_total > MAX_STDERR_TOTAL:
@@ -260,7 +299,7 @@ class _StreamTransport:
                     room = MAX_STDERR_RETAINED - len(self._stderr)
                     self._stderr.extend(chunk[:max(0, room)])
                 elif not chunk:
-                    self._selector.unregister(key.fileobj)
+                    self._unregister(key.fileobj)
                     self._stdout_eof = True
                     if self._buffer:
                         raise TransportError(incomplete_message)

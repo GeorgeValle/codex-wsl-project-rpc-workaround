@@ -132,6 +132,7 @@ class TransportTests(unittest.TestCase):
         for trailing, message in cases:
             with self.subTest(message=message):
                 process = _Process()
+                process.returncode = None
                 transport = _StreamTransport(process)
                 try:
                     transport.send(Request("expected", "project/list", {}), time.monotonic()+10)
@@ -409,5 +410,40 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(self.transport.drain_terminal(self.process, time.monotonic()+1),
                              (True, True))
         self.assertRegex(str(self.transport.terminal_error), "stdout session limit")
+
+    def test_expected_read_os_failures_are_normalized_on_all_read_paths(self):
+        self._send_request("expected", "initialize")
+        self.transport._selector = _AlwaysReadySelector(self.process.stdout, "stdout")
+        with mock.patch("codex_wsl_rpc.integration.transport.os.read",
+                        side_effect=OSError("private device detail")):
+            with self.assertRaisesRegex(TransportError, "^read failure$"):
+                self.transport.receive_response("expected", time.monotonic() + 1)
+
+        for operation in ("preflight", "terminal"):
+            with self.subTest(operation=operation):
+                process = _Process()
+                process.returncode = None
+                transport = _StreamTransport(process)
+                stream = process.stdout
+                transport._selector = _AlwaysReadySelector(stream, "stdout")
+                try:
+                    with mock.patch("codex_wsl_rpc.integration.transport.os.read",
+                                    side_effect=OSError("private device detail")):
+                        with self.assertRaisesRegex(TransportError, "^read failure$"):
+                            if operation == "preflight":
+                                transport.send(Request("id", "initialize", {}),
+                                               time.monotonic() + 1)
+                            else:
+                                transport.drain_terminal(process, time.monotonic() + 1)
+                finally:
+                    process.stdin.close(); process.stdout.close(); process.stderr.close(); process.close()
+
+    def test_partial_transport_construction_closes_selector(self):
+        selector = mock.Mock()
+        with mock.patch("codex_wsl_rpc.integration.transport.os.set_blocking",
+                        side_effect=OSError("setup detail")):
+            with self.assertRaisesRegex(TransportError, "^transport setup failure$"):
+                _StreamTransport(self.process, selector_factory=lambda: selector)
+        selector.close.assert_called_once_with()
 
 if __name__ == "__main__": unittest.main()

@@ -8,7 +8,8 @@ from codex_wsl_rpc.integration import IntegrationAuthorization, IntegrationError
 from codex_wsl_rpc.integration.client import (CleanupError, InvalidTargetError,
     OperatorCancelledError, PINNED_CODEX_SHA, StartupError,
     UnsupportedPlatformError, UnsupportedTargetError, _OwnedChildCleanup,
-    _SignalDelivery, _ValidatedTarget, _is_wsl_kernel_release)
+    _IntegrationLifecycle, _SignalDelivery, _ValidatedTarget,
+    _is_wsl_kernel_release)
 from codex_wsl_rpc.integration.transport import TransportError
 from codex_wsl_rpc.protocol import SuccessResponse
 
@@ -126,6 +127,25 @@ class ClientTests(unittest.TestCase):
         fake=FakeProcess([{"id":1,"result":{"userAgent":"private","codexHome":codex_home,"platformFamily":platform_family,"platformOs":platform_os}}, {"id":2,"result":{"data":data,"nextCursor":next_cursor}}])
         client=self._client(_popen=lambda *a,**k: fake)
         return client.list_one_page(),fake
+
+    def test_validation_fd_release_cannot_bypass_owned_child_cleanup(self):
+        target = _ValidatedTarget(executable_fd=41, home_fd=42)
+        child = _OwnedChildCleanup(CleanupProcess([0]), None)
+        lifecycle = _IntegrationLifecycle(target, child=child)
+        def finish(owned):
+            owned.started = owned.completed = True
+            return "graceful"
+        cleanup = mock.Mock(side_effect=finish)
+        with mock.patch("codex_wsl_rpc.integration.client.os.close",
+                        side_effect=[KeyboardInterrupt(), OSError("private")]):
+            with self.assertRaisesRegex(CleanupError, "finalization"):
+                lifecycle.finalize(cleanup)
+        cleanup.assert_called_once_with(child)
+        self.assertIsNone(target.executable_fd)
+        self.assertIsNone(target.home_fd)
+        # Uncertain close results are never retried against reused fd numbers.
+        lifecycle.finalize(cleanup)
+        cleanup.assert_called_once_with(child)
     def test_success_exact_sequence_and_safe_summary(self):
         result,fake=self._run([project(roots=[{"path":"/home/person/private"}])],"raw-cursor")
         self.assertEqual([r.get("method") for r in fake.requests],["initialize","initialized","project/list"])

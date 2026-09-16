@@ -126,10 +126,12 @@ Block 3 remains separately human-gated.
 
 This real-product observation remains historical evidence for the exact tested
 repository HEAD `f9f61486339029f3743db02b5ba03c4d06d627fe`. The later corrective
-runtime/test HEAD `10296e539a0fa3b3f785141e26e7798e681b623e` closes terminal transport-close
-and validation-descriptor ownership gaps and has received deterministic offline
-validation only. It has **not** been re-exercised against the real product; real
-WSL revalidation of that corrected executable runtime remains pending.
+runtime/test commit `a9489bbd896fa75578c9ecc919ba5e39b38ad612`
+closes the later lifecycle, descriptor-release, transport-construction, and
+transport error-boundary gaps and has received deterministic offline validation
+only. The commit is reachable in the current branch history. It has **not** been
+re-exercised against the real product; real WSL revalidation of that corrected
+executable runtime remains pending.
 
 The existing `READ_ONLY` / `GATE-002: SATISFIED` record describes the approved
 capability and its historical evidence. It must not be read as a claim that the
