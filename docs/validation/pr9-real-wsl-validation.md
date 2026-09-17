@@ -128,8 +128,9 @@ This real-product observation remains historical evidence for the exact tested
 repository HEAD `f9f61486339029f3743db02b5ba03c4d06d627fe`. The later corrective
 runtime/test commit `cc216bf6131e8d093eccde1df37ddcb9733a8316`
 closes the later lifecycle, descriptor-release, transport-construction, and
-transport error-boundary gaps and has received deterministic offline validation
-only. The commit is reachable in the current branch history. It has **not** been
+transport error-boundary gaps and is the durable runtime that received the fresh
+242-test offline validation twice. The commit is reachable in the current branch
+history. It has **not** been
 re-exercised against the real product; real WSL revalidation of that corrected
 executable runtime remains pending.
 
