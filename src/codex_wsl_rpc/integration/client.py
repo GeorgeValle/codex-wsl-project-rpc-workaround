@@ -92,6 +92,27 @@ class _SignalDelivery(Enum):
     DELIVERY_UNCERTAIN = "delivery_uncertain"
     DELIVERED = "delivered"
 
+
+def _reconcile_terminal_status(
+        returncode: int,
+        terminate_state: _SignalDelivery,
+        kill_state: _SignalDelivery) -> str | None:
+    """Return a truthful cleanup outcome for a compatible terminal history."""
+    if returncode == 0:
+        if kill_state is _SignalDelivery.DELIVERED:
+            return "killed_owned_child"
+        if terminate_state is _SignalDelivery.DELIVERED:
+            return "terminated_owned_child"
+        return "graceful"
+
+    if (returncode == -signal.SIGKILL and
+            kill_state is _SignalDelivery.DELIVERED):
+        return "killed_owned_child"
+    if (returncode == -signal.SIGTERM and
+            terminate_state is _SignalDelivery.DELIVERED):
+        return "terminated_owned_child"
+    return None
+
 @dataclass(slots=True)
 class _OwnedChildCleanup:
     process: object | None
@@ -544,25 +565,15 @@ class ReadOnlyProjectListClient:
                         stage_timeout, state = KILL_TIMEOUT, "deadline"
                     elif state == "finalize":
                         if reaped and stdout_eof:
-                            if owned_child.kill_state is _SignalDelivery.DELIVERED:
-                                if process.returncode == -signal.SIGKILL:
-                                    outcome = "killed_owned_child"
-                                else:
-                                    failures.append("child_exit")
-                            elif owned_child.terminate_state is _SignalDelivery.DELIVERED:
-                                if process.returncode in (0, -signal.SIGTERM):
-                                    outcome = "terminated_owned_child"
-                                else:
-                                    failures.append("child_exit")
-                            elif (owned_child.kill_state is
-                                  _SignalDelivery.DELIVERY_UNCERTAIN or
-                                  owned_child.terminate_state is
-                                  _SignalDelivery.DELIVERY_UNCERTAIN):
-                                failures.append("signal_delivery")
-                            elif process.returncode != 0:
+                            reconciled = _reconcile_terminal_status(
+                                process.returncode,
+                                owned_child.terminate_state,
+                                owned_child.kill_state,
+                            )
+                            if reconciled is None:
                                 failures.append("child_exit")
                             else:
-                                outcome = "graceful"
+                                outcome = reconciled
                             owned_child.completed = True
                             owned_child.process = None
                             owned_child.transport = None

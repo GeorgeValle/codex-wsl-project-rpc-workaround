@@ -9,7 +9,7 @@ from codex_wsl_rpc.integration.client import (CleanupError, InvalidTargetError,
     OperatorCancelledError, PINNED_CODEX_SHA, StartupError,
     UnsupportedPlatformError, UnsupportedTargetError, _OwnedChildCleanup,
     _IntegrationLifecycle, _SignalDelivery, _ValidatedTarget,
-    _is_wsl_kernel_release)
+    _is_wsl_kernel_release, _reconcile_terminal_status)
 from codex_wsl_rpc.integration.transport import TransportError
 from codex_wsl_rpc.protocol import SuccessResponse
 
@@ -643,44 +643,78 @@ class ClientTests(unittest.TestCase):
                 process.terminate.assert_not_called()
                 process.kill.assert_not_called()
 
-    def test_forced_cleanup_allows_signal_exit_status(self):
-        cases = (
-            ([subprocess.TimeoutExpired("fake", 1), -15],
-             "terminated_owned_child", 1, 0),
-            ([subprocess.TimeoutExpired("fake", 1), 0],
-             "terminated_owned_child", 1, 0),
-            ([subprocess.TimeoutExpired("fake", 1),
-              subprocess.TimeoutExpired("fake", 1), -9],
-             "killed_owned_child", 1, 1),
+    def test_terminal_status_compatibility_matrix(self):
+        N = _SignalDelivery.NOT_ATTEMPTED
+        U = _SignalDelivery.DELIVERY_UNCERTAIN
+        D = _SignalDelivery.DELIVERED
+        histories = (
+            (N, N, "no_signal"),
+            (U, N, "terminate_uncertain"),
+            (D, N, "terminate_delivered"),
+            (D, U, "terminate_delivered_kill_uncertain"),
+            (D, D, "terminate_and_kill_delivered"),
+            (N, D, "kill_only_delivered"),
+            (U, D, "terminate_uncertain_kill_delivered"),
         )
-        for waits, expected, terminates, kills in cases:
-            with self.subTest(expected=expected):
-                process = CleanupProcess(waits)
-                state = _OwnedChildCleanup(process, None)
-                self.assertEqual(self._client()._cleanup(state), expected)
-                self.assertEqual(process.terminate.call_count, terminates)
-                self.assertEqual(process.kill.call_count, kills)
+        returncodes = (0, 1, 2, -signal.SIGTERM, -signal.SIGKILL,
+                       -signal.SIGINT)
 
-    def test_forced_cleanup_rejects_incompatible_exit_status(self):
-        cases = (
-            ([subprocess.TimeoutExpired("fake", 1), 1], 1, 0),
-            ([subprocess.TimeoutExpired("fake", 1), 23], 1, 0),
-            ([subprocess.TimeoutExpired("fake", 1), -signal.SIGKILL], 1, 0),
-            ([subprocess.TimeoutExpired("fake", 1),
-              subprocess.TimeoutExpired("fake", 1), 1], 1, 1),
+        for terminate_state, kill_state, history in histories:
+            for returncode in returncodes:
+                with self.subTest(history=history, returncode=returncode):
+                    expected = None
+                    if returncode == 0:
+                        expected = ("killed_owned_child" if kill_state is D else
+                                    "terminated_owned_child"
+                                    if terminate_state is D else "graceful")
+                    elif returncode == -signal.SIGTERM and terminate_state is D:
+                        expected = "terminated_owned_child"
+                    elif returncode == -signal.SIGKILL and kill_state is D:
+                        expected = "killed_owned_child"
+                    self.assertEqual(
+                        _reconcile_terminal_status(
+                            returncode, terminate_state, kill_state
+                        ),
+                        expected,
+                    )
+                    process = CleanupProcess([])
+                    process.returncode = returncode
+                    state = _OwnedChildCleanup(
+                        process,
+                        TerminalCleanupTransport([(True, True)]),
+                        terminate_state=terminate_state,
+                        kill_state=kill_state,
+                        terminate_attempts=(0 if terminate_state is N else 2),
+                        kill_attempts=(0 if kill_state is N else 2),
+                    )
+                    client = self._client(
+                        _clock=ScriptedClock([0.0, 0.0, 7.0])
+                    )
+                    if expected is None:
+                        with self.assertRaises(CleanupError) as caught:
+                            client._cleanup(state)
+                        self.assertEqual(caught.exception.category,
+                                         "cleanup_failure")
+                        self.assertEqual(str(caught.exception),
+                                         "owned-child cleanup failed")
+                    else:
+                        self.assertEqual(client._cleanup(state), expected)
+
+    def test_sigterm_exit_racing_with_reported_sigkill_is_accepted(self):
+        process = CleanupProcess([
+            subprocess.TimeoutExpired("fake", 1),
+            subprocess.TimeoutExpired("fake", 1),
+            -signal.SIGTERM,
+        ])
+        state = _OwnedChildCleanup(process, None)
+
+        self.assertEqual(
+            self._client()._cleanup(state), "terminated_owned_child"
         )
-        for waits, terminates, kills in cases:
-            with self.subTest(waits=waits):
-                process = CleanupProcess(waits)
-                state = _OwnedChildCleanup(process, None)
-
-                with self.assertRaisesRegex(CleanupError,
-                                            "owned-child cleanup failed"):
-                    self._client()._cleanup(state)
-
-                self.assertTrue(state.completed)
-                self.assertEqual(process.terminate.call_count, terminates)
-                self.assertEqual(process.kill.call_count, kills)
+        self.assertIs(state.terminate_state, _SignalDelivery.DELIVERED)
+        self.assertIs(state.kill_state, _SignalDelivery.DELIVERED)
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
 
     def test_uncertain_signal_delivery_is_not_upgraded_by_final_status(self):
         process = CleanupProcess([])
