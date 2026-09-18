@@ -113,6 +113,7 @@ class ProjectListResponse:
     def from_wire(cls, value: JsonValue) -> Self:
         obj = _object(value, "project/list response")
         if "data" not in obj: raise ProtocolDecodeError("project/list response: missing required member data")
+        if "nextCursor" not in obj: raise ProtocolDecodeError("project/list response: missing required member nextCursor")
         if not isinstance(obj["data"], list): raise ProtocolDecodeError("data: expected array")
-        return _model(cls, data=tuple(Project.from_wire(item) for item in obj["data"]), next_cursor=obj.get("nextCursor"))
+        return _model(cls, data=tuple(Project.from_wire(item) for item in obj["data"]), next_cursor=obj["nextCursor"])
     def to_wire(self) -> dict[str, JsonValue]: return {"data": [item.to_wire() for item in self.data], "nextCursor": self.next_cursor}

@@ -421,6 +421,11 @@ human approval; those process controls are not intrinsic GATE-001 rows.
 
 ## Open questions and explicit non-goals
 
+The Phase A integration consumes only the pinned server notifications
+`configWarning` and `remoteControl/status/changed`, with bounded counts/bytes
+and discarded payloads. This narrow handling does not establish that either
+notification will occur in an installed build.
+
 Open integration questions are the Desktop-owned endpoint/process, selected
 state root, installed-build mapping, startup writes, and cross-platform path
 round-tripping. They constrain Subdivision 2.3 but do not block completion of
@@ -432,13 +437,19 @@ research but are now delivered by Delivery 3. That delivery is limited to the
 JSON-line transport and fixture store, the fake app-server lifecycle, and
 deterministic mock `project/list` behavior.
 
-Real integration remains an explicit non-goal: no real Codex/app-server process
-startup, real stdio process transport, Unix socket transport, WebSocket/TCP
-transport, attachment to a Desktop-owned app-server, real RPC execution, real
-`project/list`, or real Project-store access is delivered. Access to
+Phase A delivers a gated, offline-tested stdio integration path for
+`initialize`, `initialized`, and one `project/list` page. An explicitly
+authorized historical local WSL validation exercised that exact path
+successfully, and a separate final current-runtime WSL validation also passed;
+capability is therefore `READ_ONLY` and GATE-002 is `SATISFIED`. The historical
+run's returned empty page diverged from the non-empty Desktop-visible Project
+list, and the cause remains `NOT_ESTABLISHED`. Desktop comparison was `NOT_RUN`
+for the final revalidation. Unix socket or WebSocket/TCP
+transport and attachment to a Desktop-owned app-server remain explicit
+non-goals. Access to
 `~/.codex`, SQLite, Desktop configuration or state, and Windows/WSL path
 adaptation also remains deferred, as do Desktop sidebar/store equivalence
-claims and Subdivision 2.3 integration. Mutation authorization remains `NONE`:
+claims. Mutation authorization remains `NONE`:
 Project mutation and `project/create`, `project/update`, `project/import`,
 `project/move`, and `project/delete` are explicit non-goals.
 

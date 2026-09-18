@@ -47,7 +47,8 @@ def repository_cache_dir(cache: Path, root: Path) -> Path:
 
 
 def guarded_import_probe(*, include_distribution_metadata: bool = False,
-                         include_mock_subpackage: bool = False) -> str:
+                         include_mock_subpackage: bool = False,
+                         include_integration_subpackage: bool = False) -> str:
     """Return the child-only package probe used by both validation paths."""
 
     metadata_probe = ""
@@ -74,6 +75,14 @@ metadata_result = {
         mock_origin = (
             '\n        "mock_origin": '
             'str(Path(codex_wsl_rpc.mock.__file__).resolve()),'
+        )
+    integration_import = ""
+    integration_origin = ""
+    if include_integration_subpackage:
+        integration_import = "    import codex_wsl_rpc.integration\n"
+        integration_origin = (
+            '\n        "integration_origin": '
+            'str(Path(codex_wsl_rpc.integration.__file__).resolve()),'
         )
 
     return f"""
@@ -161,6 +170,7 @@ _thread.start_new_thread = prohibited("_thread.start_new_thread")
 try:
     import codex_wsl_rpc
 {mock_import.rstrip()}
+{integration_import.rstrip()}
 finally:
     observing_import = False
     threading.Thread.start = original_thread_start
@@ -171,6 +181,7 @@ Path(os.environ["FOUNDATION_REPORT"]).write_text(
     json.dumps({{
         "origin": str(Path(codex_wsl_rpc.__file__).resolve()),
 {mock_origin}
+{integration_origin}
         "invoked": invoked,
         "filesystem_io": filesystem_io,
         "denied_audit_events": denied_audit_events,
