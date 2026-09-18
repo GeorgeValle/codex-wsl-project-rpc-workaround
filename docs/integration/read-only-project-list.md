@@ -162,6 +162,13 @@ The authorized real WSL observation is tied to repository HEAD
 `f9f61486339029f3743db02b5ba03c4d06d627fe`. A later corrective runtime/test
 commit, `cc216bf6131e8d093eccde1df37ddcb9733a8316`, is the reachable,
 durable runtime that received the fresh 242-test offline validation twice, but has
-not been re-exercised against the real product. Real WSL revalidation of the
-corrected executable runtime remains pending; the prior observation remains
-historical evidence and is not attributed to the newer HEAD.
+not received those historical real-run observations.
+
+Final current-runtime real WSL revalidation separately passed for
+`37f4e844903da179a068504ae64e180a3cdfd491`: `initialize` succeeded,
+`initialized` was sent, `project/list` succeeded with an empty terminal page,
+cleanup was graceful, and no mutation was attempted. Desktop comparison was
+`NOT_RUN` for this final run, so it adds no new Desktop-comparison conclusion.
+The earlier `DIVERGENCE_OBSERVED` comparison remains historical evidence tied
+only to `f9f61486339029f3743db02b5ba03c4d06d627fe`, with cause
+`NOT_ESTABLISHED`.

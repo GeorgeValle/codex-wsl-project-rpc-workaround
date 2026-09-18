@@ -2,9 +2,9 @@
 
 > **Experimental and unofficial.** This project is not affiliated with or
 > endorsed by OpenAI. The repository has a narrowly scoped **read-only**
-> capability. One explicitly authorized local WSL validation successfully ran
-> `initialize`, sent `initialized`, and ran `project/list`; no mutation capability
-> exists.
+> capability. Human-provided WSL evidence includes a historical validation and
+> a separate final current-runtime revalidation of `initialize`, `initialized`,
+> and `project/list`; no mutation capability exists.
 
 ## Project purpose
 
@@ -80,12 +80,15 @@ and experimental Project-management RPC functionality exposed by app-server.
 The objective is to manage Projects without relying on the broken Desktop
 Project registration path.
 
-Read-only Project listing has been demonstrated once against an
-operator-selected Codex Desktop WSL executable. The independently launched
-app-server returned a valid empty page, while the already-open Desktop UI showed
-multiple Projects. That divergence is observed but unexplained; it does not
-establish Desktop/app-server store equivalence or a universal workaround.
-Controlled Project creation and update remain future, separately gated work.
+Read-only Project listing has been demonstrated against an operator-selected
+Codex Desktop WSL executable and revalidated on the final current runtime. The
+historical run's independently launched app-server returned a valid empty page
+while the already-open Desktop UI showed multiple Projects. That historical
+divergence is observed but unexplained. Desktop comparison was not run during
+the final revalidation, which adds no new Desktop-correspondence conclusion.
+Neither run establishes Desktop/app-server store equivalence or a universal
+workaround. Controlled Project creation and update remain future, separately
+gated work.
 
 ## Staged progression
 

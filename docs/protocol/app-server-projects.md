@@ -438,11 +438,13 @@ JSON-line transport and fixture store, the fake app-server lifecycle, and
 deterministic mock `project/list` behavior.
 
 Phase A delivers a gated, offline-tested stdio integration path for
-`initialize`, `initialized`, and one `project/list` page. One explicitly
-authorized local WSL validation subsequently exercised that exact path
-successfully; capability is therefore `READ_ONLY` and GATE-002 is `SATISFIED`.
-The returned empty page diverged from the non-empty Desktop-visible Project
-list, and the cause remains `NOT_ESTABLISHED`. Unix socket or WebSocket/TCP
+`initialize`, `initialized`, and one `project/list` page. An explicitly
+authorized historical local WSL validation exercised that exact path
+successfully, and a separate final current-runtime WSL validation also passed;
+capability is therefore `READ_ONLY` and GATE-002 is `SATISFIED`. The historical
+run's returned empty page diverged from the non-empty Desktop-visible Project
+list, and the cause remains `NOT_ESTABLISHED`. Desktop comparison was `NOT_RUN`
+for the final revalidation. Unix socket or WebSocket/TCP
 transport and attachment to a Desktop-owned app-server remain explicit
 non-goals. Access to
 `~/.codex`, SQLite, Desktop configuration or state, and Windows/WSL path

@@ -124,16 +124,64 @@ Block 3 remains separately human-gated.
 
 ## Corrective-runtime revalidation status
 
-This real-product observation remains historical evidence for the exact tested
-repository HEAD `f9f61486339029f3743db02b5ba03c4d06d627fe`. The later corrective
-runtime/test commit `cc216bf6131e8d093eccde1df37ddcb9733a8316`
-closes the later lifecycle, descriptor-release, transport-construction, and
-transport error-boundary gaps and is the durable runtime that received the fresh
-242-test offline validation twice. The commit is reachable in the current branch
-history. It has **not** been
-re-exercised against the real product; real WSL revalidation of that corrected
-executable runtime remains pending.
+The first real-product observation remains historical evidence for the exact
+tested repository HEAD `f9f61486339029f3743db02b5ba03c4d06d627fe`. The later
+commit `cc216bf6131e8d093eccde1df37ddcb9733a8316` remains the durable
+offline-tested runtime: its 242-test suite passed twice. Those offline results
+are not attributed to a later runtime.
+
+## Final current-runtime validation
+
+Result: `REAL_WSL_VALIDATION_PASS`
+
+This is a separate, human-performed revalidation of the final current runtime;
+it is not a rewrite of the earlier historical run or the durable offline test
+record.
+
+| Evidence field | Sanitized observation |
+|---|---|
+| Runtime SHA | `37f4e844903da179a068504ae64e180a3cdfd491` |
+| Observed UTC | `2026-09-18T07:29:06.492369+00:00` |
+| Initialize attempted / succeeded | `true` / `true` |
+| Initialized sent | `true` |
+| Project list attempted / succeeded | `true` / `true` |
+| Returned page count | `0` |
+| Has more | `false` |
+| Cleanup outcome | `graceful` |
+| Mutation attempted | `false` |
+| Desktop comparison | `NOT_RUN` |
+| Direct state inspection | `false` |
+| Network effects | `NOT_ESTABLISHED` |
+| Helper-process effects | `NOT_ESTABLISHED` |
+| Product-state impact | `NOT_ESTABLISHED` |
+| Platform family / OS | `unix` / `linux` |
+| Codex-home category | `posix_absolute` |
+| Root representation categories | `[]` |
+| Target provenance | `operator_confirmed_openai_codex_unverified_by_repository` |
+| Target revision mapping | `NOT_ESTABLISHED` |
+| Target version | `unobserved` |
+| Protocol reference SHA | `7efa9d96fb34c3cafe108a3c870bfc33e5635772` |
+
+The operator used the reviewed runner with explicit execution authorization,
+an operator-selected native WSL Codex executable, and an explicit WSL home. The
+approved lifecycle remained exactly `initialize`, `initialized`, and
+`project/list`; no mutation was authorized or attempted. The result demonstrates
+successful execution of that read-only lifecycle on the final runtime.
+
+The final run did not perform a Desktop comparison and therefore supports no
+new Desktop-comparison conclusion. It is not classified as
+`DIVERGENCE_OBSERVED`. Separately, the earlier historical run at
+`f9f61486339029f3743db02b5ba03c4d06d627fe` included a manual Desktop
+comparison and remains classified `DIVERGENCE_OBSERVED`, with cause
+`NOT_ESTABLISHED`.
+
+The final run does not establish product network effects, helper-process
+effects, product-state impact, installed-executable mapping to the pinned source
+revision, target version, universal behavior across Codex versions, physical
+Project-store identity, Desktop/app-server store equivalence, the cause of the
+historical Desktop divergence, path-adaptation correctness, or any mutation
+safety.
 
 The existing `READ_ONLY` / `GATE-002: SATISFIED` record describes the approved
-capability and its historical evidence. It must not be read as a claim that the
-later corrective runtime HEAD received the earlier real run.
+capability. Subdivision 2.3 remains `IMPLEMENTED`, mutation authorization remains
+`NONE`, and final current-runtime real WSL revalidation is now `PASSED`.
